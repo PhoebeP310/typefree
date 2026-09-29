@@ -31,12 +31,20 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
     /// 驱动一次 ingest，等提交处理完；返回是否真的提交了（不再有可提交段时返回 false，不失败）
     @discardableResult
     private func ingestOnce(_ session: StreamingTranscriptionSession, _ snapshot: [Float]) -> Bool {
-        let exp = expectation(description: "commit")
-        session.onCommitProcessed = { _ in exp.fulfill() }
+        // 「提交了」和「这次没东西可提交」各有一个钩子，哪个先响就是哪个结果——不靠超时判定。
+        // 原先用 0.4s 超时当「没提交」的判据：慢机器（CI）上可能把一次真提交判成没提交，
+        // drainCommits 提前收手、后面的断言跟着失败；单纯把超时放宽又会让整套测试从 12s 变 46s。
+        let settled = expectation(description: "ingest settled")
+        settled.assertForOverFulfill = false
+        var didCommit = false
+        session.onCommitProcessed = { _ in didCommit = true; settled.fulfill() }
+        session.onIngestIdle = { settled.fulfill() }
         session.ingest(snapshot: snapshot)
-        let result = XCTWaiter().wait(for: [exp], timeout: 0.4)
+        let outcome = XCTWaiter().wait(for: [settled], timeout: 5)
         session.onCommitProcessed = nil
-        return result == .completed
+        session.onIngestIdle = nil
+        XCTAssertEqual(outcome, .completed, "ingest 既没提交也没报空闲，说明卡住了")
+        return didCommit
     }
 
     /// 反复 ingest 直到不再产生新提交

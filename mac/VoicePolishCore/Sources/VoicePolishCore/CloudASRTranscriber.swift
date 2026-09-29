@@ -165,20 +165,11 @@ public final class CloudASRTranscriber {
         config.save(value: version.rawValue, forKey: "bigasr_version")
     }
 
-    /// 生成 API 的 corpus.context JSON 字符串（dialog_ctx 上下文格式）。
-    /// 注意：不要改回 {"hotwords":[...]} 内联格式——那是流式接口的写法，
-    /// 录音文件接口（极速版/标准版/2.0）会静默忽略它；dialog_ctx 三个版本实测均生效。
+    /// 生成 API 的 corpus.context JSON 字符串：词库按官方「热词直传」格式传，另附 dialog_ctx 提示句（见 PersonalVocabulary.VolcanoVocabMode）。
+    /// 2026-09-23 核对官方文档：录音文件接口（极速版 / 标准版）正式支持 {"hotwords":[{"word":…}]} 直传，
+    /// 旧注释说「录音文件接口会静默忽略它」已被新版文档否定。
     private func hotWordsContextJSON() -> String? {
-        guard let sentence = PersonalVocabulary.asrContextSentence() else { return nil }
-        let contextObj: [String: Any] = [
-            "context_type": "dialog_ctx",
-            "context_data": [["text": sentence]]
-        ]
-        guard let contextData = try? JSONSerialization.data(withJSONObject: contextObj),
-              let contextStr = String(data: contextData, encoding: .utf8) else {
-            return nil
-        }
-        return contextStr
+        PersonalVocabulary.volcanoContextJSON()
     }
 
     /// 热词请求字段。三个版本一致：内联热词、热词表、替换词表全部放在 request.corpus 下。
@@ -315,7 +306,7 @@ public final class CloudASRTranscriber {
             }
             let body = makeRequestBody(audioData: audioData, format: audioFormat)
             let hotWordCount = PersonalVocabulary.currentWords().count
-            debugLog?("Cloud ASR: version=\(version.rawValue) provider=volcano resource=\(version.resourceID) sync=\(version.isSync) hotwords=\(hotWordCount) audio=\(audioFormat)/\(audioData.count / 1024)KB budget=\(Int(budget))s")
+            debugLog?("Cloud ASR: version=\(version.rawValue) provider=volcano resource=\(version.resourceID) sync=\(version.isSync) hotwords=\(hotWordCount) vocab=\(PersonalVocabulary.currentVolcanoVocabMode().rawValue) audio=\(audioFormat)/\(audioData.count / 1024)KB budget=\(Int(budget))s")
             if version.isSync {
                 transcribeSync(body: body, credentials: credentials, resourceID: version.resourceID, budgetSeconds: budget, completion: completion)
             } else {

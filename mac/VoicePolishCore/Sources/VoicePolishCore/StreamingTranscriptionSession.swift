@@ -30,6 +30,9 @@ public final class StreamingTranscriptionSession {
 
     /// 测试观测钩子：每段录音中提交处理完后触发，参数为当前已提交样本位置。生产环境不设置。
     var onCommitProcessed: ((Int) -> Void)?
+    /// 测试观测钩子：一次 ingest 没有可提交的段时触发。测试据此判定「这次没东西可提交」，
+    /// 不必再靠"等若干毫秒没回调就算没提交"——那种写法在慢机器上会把真提交误判成没提交。生产环境不设置。
+    var onIngestIdle: (() -> Void)?
     /// 已提交样本位置（测试断言用）
     var committedIndexForTest: Int { queue.sync { committedIndex } }
 
@@ -66,22 +69,22 @@ public final class StreamingTranscriptionSession {
     // MARK: - 提交（录音中）
 
     private func tryCommit(snapshot: [Float]) {
-        guard !finished, !committing else { return }
+        guard !finished, !committing else { onIngestIdle?(); return }
         let sr = Double(Self.sampleRate)
         let liveEnd = snapshot.count - Int(Self.liveMarginSeconds * sr)
         let minChunk = Int(Self.minCommitSeconds * sr)
-        guard liveEnd - committedIndex >= minChunk else { return }
+        guard liveEnd - committedIndex >= minChunk else { onIngestIdle?(); return }
 
         // 用整段快照算停顿（floor/speech 更稳），再筛到可提交窗口
         let candidates = AudioChunker.pauseCandidates(samples: snapshot)
-        guard !candidates.isEmpty else { return }
+        guard !candidates.isEmpty else { onIngestIdle?(); return }
 
         let target = committedIndex + Int(Self.targetCommitSeconds * sr)
         let cut = candidates
             .map { $0.centerSample }
             .filter { $0 > lastEmptyCut && $0 - committedIndex >= minChunk && $0 <= liveEnd }
             .min { abs($0 - target) < abs($1 - target) }
-        guard let cut = cut else { return }
+        guard let cut = cut else { onIngestIdle?(); return }
 
         committing = true
         let chunk = Array(snapshot[committedIndex..<cut])

@@ -25,6 +25,9 @@ class StatusBarController {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "打开 Typefree", action: #selector(openSettingsCenter), keyEquivalent: "")
             .target = self
+        // 工单 #17：加词不用再进主窗口翻到词库页
+        menu.addItem(withTitle: "个人词库…", action: #selector(openVocabulary), keyEquivalent: "")
+            .target = self
         menu.addItem(withTitle: "检查更新…", action: #selector(AppDelegate.checkForUpdates(_:)), keyEquivalent: "")
             .target = delegate
         menu.addItem(NSMenuItem.separator())
@@ -32,6 +35,8 @@ class StatusBarController {
         rebuildMicSubmenu()
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "纠正上次结果", action: #selector(showManualCorrection), keyEquivalent: "")
+            .target = self
+        menu.addItem(withTitle: "复制最后一句", action: #selector(copyLastDeliveredText), keyEquivalent: "")
             .target = self
         menu.addItem(NSMenuItem.separator())
         updateHotkeyHint()
@@ -158,6 +163,12 @@ class StatusBarController {
         NSApplication.shared.terminate(nil)
     }
 
+    @objc private func copyLastDeliveredText() {
+        DispatchQueue.main.async {
+            self.delegate?.copyLastDeliveredText()
+        }
+    }
+
     @objc private func showManualCorrection() {
         DispatchQueue.main.async {
             self.delegate?.showManualCorrection()
@@ -167,6 +178,12 @@ class StatusBarController {
     @objc private func openSettingsCenter() {
         DispatchQueue.main.async {
             self.delegate?.showSettingsCenter()
+        }
+    }
+
+    @objc private func openVocabulary() {
+        DispatchQueue.main.async {
+            self.delegate?.showVocabularySettings()
         }
     }
 

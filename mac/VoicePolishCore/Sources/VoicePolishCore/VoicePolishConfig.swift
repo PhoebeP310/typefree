@@ -8,6 +8,17 @@ public final class VoicePolishConfig {
     private let configPath: URL
     private let secrets: SecretStoring
 
+    /// 配置目录为什么没用默认位置（~/.config/voicepolish）。nil = 用的默认位置。
+    /// 工单 #9：用户的 ~/.config 被 root 占着，App 建不了自己的文件夹，设置一次都没存成功过，每次启动都像第一次。
+    public let storageFallbackReason: String?
+    /// 最近一次 config.json 写失败的原因（写成功会清掉）。首页「配置健康」据此亮「设置无法保存」。
+    public private(set) var lastWriteFailure: String?
+
+    /// 写失败 / 读不出来时往 App 日志里记一笔。原先两者都静默：用户只看到「设置存不下来、每次都要重新设」，
+    /// 我们从他发来的日志里也查不出原因（工单 #1007）。只记日志，不改任何行为。
+    public var debugLog: ((String) -> Void)?
+    private var didLogLoadFailure = false
+
     /// 敏感键：存 Keychain，绝不写明文 config.json。
     static let secretKeys: Set<String> = [
         "ark_api_key", "dashscope_api_key", "bigasr_api_key",
@@ -28,19 +39,59 @@ public final class VoicePolishConfig {
         self.init(configDir: containerURL,
                   secrets: KeychainSecretStore(accessGroup: "NHC4C4K7X7.com.voicepolish.shared"))
         #else
-        // macOS：使用用户主目录（钥匙串不设 access group）
-        let dir = FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".config/voicepolish")
-        self.init(configDir: dir)
+        // macOS：使用用户主目录（钥匙串不设 access group）；建不了/写不进就退到 Application Support
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let resolved = Self.resolveStorageDirectory(
+            primary: home.appendingPathComponent(".config/voicepolish"),
+            fallback: home.appendingPathComponent("Library/Application Support/Typefree")
+        )
+        self.init(configDir: resolved.directory, fallbackReason: resolved.fallbackReason)
         #endif
     }
 
     /// 可注入的初始化方法，用于测试或自定义路径
-    public init(configDir: URL, secrets: SecretStoring = KeychainSecretStore.shared) {
+    public init(configDir: URL, secrets: SecretStoring = KeychainSecretStore.shared, fallbackReason: String? = nil) {
         self.configDir = configDir
         self.configPath = configDir.appendingPathComponent("config.json")
         self.secrets = secrets
+        self.storageFallbackReason = fallbackReason
         hardenLocalStoragePermissions()
+    }
+
+    /// 选配置目录：默认位置能用就用默认位置（老用户路径一个字不变）；只有默认位置建不了或写不进，
+    /// 才退到 fallback。已经在 fallback 里存过设置、而默认位置还是空的，就继续用 fallback，别来回跳。
+    static func resolveStorageDirectory(primary: URL, fallback: URL, fileManager fm: FileManager = .default) -> (directory: URL, fallbackReason: String?) {
+        let primaryHasConfig = fm.fileExists(atPath: primary.appendingPathComponent("config.json").path)
+        let fallbackHasConfig = fm.fileExists(atPath: fallback.appendingPathComponent("config.json").path)
+        if fallbackHasConfig && !primaryHasConfig {
+            return (fallback, "之前已改用备用位置")
+        }
+        if let problem = Self.storageProblem(at: primary, fileManager: fm) {
+            return (fallback, problem)
+        }
+        return (primary, nil)
+    }
+
+    /// 目录能不能当配置目录用：不存在就试着建；存在则试写一个探针文件。返回 nil = 可用。
+    private static func storageProblem(at dir: URL, fileManager fm: FileManager) -> String? {
+        var isDir: ObjCBool = false
+        if !fm.fileExists(atPath: dir.path, isDirectory: &isDir) {
+            do {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            } catch {
+                return "建不了 \(dir.path)：\(error.localizedDescription)"
+            }
+        } else if !isDir.boolValue {
+            return "\(dir.path) 不是文件夹"
+        }
+        let probe = dir.appendingPathComponent(".write-probe-\(ProcessInfo.processInfo.processIdentifier)")
+        do {
+            try Data().write(to: probe, options: .atomic)
+            try? fm.removeItem(at: probe)
+            return nil
+        } catch {
+            return "写不进 \(dir.path)：\(error.localizedDescription)"
+        }
     }
 
     public func string(forKey key: String, envKey: String? = nil, persistEnvValue: Bool = false) -> String? {
@@ -192,8 +243,11 @@ public final class VoicePolishConfig {
             #if os(macOS)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: configPath.path)
             #endif
+            lastWriteFailure = nil
             return true
         } catch {
+            lastWriteFailure = "\(configPath.path)：\(error.localizedDescription)"
+            debugLog?("配置写入失败：\(configPath.path) — \(error.localizedDescription)（设置将无法保存）")
             return false
         }
     }
@@ -213,6 +267,11 @@ public final class VoicePolishConfig {
     public func loadConfig() -> [String: Any] {
         guard let data = try? Data(contentsOf: configPath),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            // 文件在却读不出来 = 权限不对或内容损坏，设置会全部回到默认值。每个进程只记一次，免得刷屏。
+            if !didLogLoadFailure, FileManager.default.fileExists(atPath: configPath.path) {
+                didLogLoadFailure = true
+                debugLog?("配置读取失败：\(configPath.path)（文件在，但读不出来或格式坏了，设置会回到默认值）")
+            }
             return [:]
         }
         return json

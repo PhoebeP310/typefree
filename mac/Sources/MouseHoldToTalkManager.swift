@@ -100,6 +100,8 @@ final class MouseHoldToTalkManager {
         /// 问 AI 已开始录音、但还没判断出开口：按键还留在 App 手里（没合成「松开」）。
         /// 这期间拖动 = 在 App 里选字，悄悄撤销问 AI；松手照常识别（收音小时可能一直判断不出开口）
         var awaitingSpeech = false
+        /// 设置窗（工单输入框等）只放行输入框长按说话，空白处不问 AI；引导页仍可以问 AI
+        var askAllowed = true
     }
 
     private let onStart: () -> Bool
@@ -132,6 +134,8 @@ final class MouseHoldToTalkManager {
     var onStartAsk: (() -> Bool)?
     /// 自己 App 的窗口一律不触发，唯独新功能引导窗里的「试一试」输入框放行：返回引导窗的窗口编号
     var guideWindowNumber: (() -> Int?)?
+    /// 设置窗（工单输入框、词库、提示词等）里的输入框也放行长按说话，但空白处不问 AI：返回设置窗的窗口编号
+    var dictationWindowNumber: (() -> Int?)?
     /// 问 AI 在判断出开口前被拖动（是在 App 里选字）：悄悄丢掉录音，不提示
     var onAbortAsk: (() -> Void)?
     /// 鼠标长按录音开始（按键已交还系统、手势跟踪开始），参数为按下点
@@ -213,9 +217,11 @@ final class MouseHoldToTalkManager {
         // 本地监听必须把事件原样还回去，否则窗口本身收不到点击。
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .leftMouseUp, .leftMouseDragged]) { [weak self] event in
             guard let self else { return event }
-            let guideNumber = self.guideWindowNumber?()
+            let allowed = [self.guideWindowNumber?(), self.dictationWindowNumber?()].compactMap { $0 }
             // 松开/拖动没有 window 归属时也要送到（按住期间指针可能已离开窗口）
-            if (guideNumber != nil && event.window?.windowNumber == guideNumber) || (event.type != .leftMouseDown && self.press != nil) {
+            if let number = event.window?.windowNumber, allowed.contains(number) {
+                self.dispatch(event)
+            } else if event.type != .leftMouseDown, self.press != nil {
                 self.dispatch(event)
             }
             return event
@@ -261,7 +267,8 @@ final class MouseHoldToTalkManager {
         if pid <= 0 { pid = WindowLookup.ownerPID(at: point) ?? 0 }
         let ownPID = ProcessInfo.processInfo.processIdentifier
         let onGuideWindow = pid == ownPID && windowID != 0 && guideWindowNumber?() == Int(windowID)
-        guard pid > 0, pid != ownPID || onGuideWindow else { debugLog?("down ignored: pid=\(pid)"); return }
+        let onSettingsWindow = pid == ownPID && windowID != 0 && dictationWindowNumber?() == Int(windowID)
+        guard pid > 0, pid != ownPID || onGuideWindow || onSettingsWindow else { debugLog?("down ignored: pid=\(pid)"); return }
         let running = NSRunningApplication(processIdentifier: pid)
 
         pressCounter += 1
@@ -278,6 +285,7 @@ final class MouseHoldToTalkManager {
             lockDistance: availableBelow.map { MouseHoldToTalkSettings.lockDistance(availableBelow: $0) }
                 ?? MouseHoldToTalkSettings.lockArmDistance
         )
+        current.askAllowed = !onSettingsWindow || onGuideWindow
         press = current
         debugLog?("down #\(current.id) at \(TextInputLocator.fmt(point)) app=\(current.appName)")
 
@@ -584,7 +592,7 @@ final class MouseHoldToTalkManager {
         guard var current = press, current.id == pressID, !current.recording else { return }
         var askMode = false
         // 自家引导页的空白处也放行问 AI（Ray 9-15：看完演示想立刻在引导页上试一下）；输入框仍走长按说话
-        if case .askable = verdict, onStartAsk != nil, MouseHoldToTalkSettings.isAskEnabled {
+        if case .askable = verdict, current.askAllowed, onStartAsk != nil, MouseHoldToTalkSettings.isAskEnabled {
             askMode = true
         } else if !verdict.isEditable || !MouseHoldToTalkSettings.isEnabled {
             // 只开了「随时问 AI」没开「鼠标长按说话」：输入框上按住不录音

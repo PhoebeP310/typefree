@@ -17,6 +17,15 @@ enum RecordingHotkeyBehavior {
     // 表现为「胶囊一闪而过」。放宽到 0.50，让 0.3~0.4 秒的单击稳定算单击，长按需按住超过半秒。
     static let holdThreshold: TimeInterval = 0.50
 
+    // 松手要等多久才算数。平时 0.08 秒：滤掉修饰键信号的瞬间抖动，松手即停不拖慢。
+    static let releaseConfirmDelay: TimeInterval = 0.08
+    // 刚按下的头 1.5 秒里放宽到 0.35 秒。按得慢、键没压实时，按键信号会「松开零点几秒又按回去」
+    // （Ray 2026-09-23 两次：按下后 0.1～1 秒内出现 0.04～0.28 秒的松开），以前被当成松手——
+    // 录音刚开始就停（或被当成单击、紧接着那下按回去又被当成第二下停掉），听着就是「开始、结束」一起响。
+    // 这段时间里 0.35 秒内按回去就当一直按着；说了一会儿以后的松手仍按 0.08 秒确认，收尾不变慢。
+    static let earlyPressWindow: TimeInterval = 1.5
+    static let earlyReleaseConfirmDelay: TimeInterval = 0.35
+
     static var isTapToggleEnabled: Bool {
         VoicePolishConfig.shared.bool(
             forKey: tapToggleConfigKey,
@@ -306,10 +315,12 @@ class HotkeyManager {
     private var pendingStopWorkItem: DispatchWorkItem?
     private var holdPromotionWorkItem: DispatchWorkItem?
     /// 「真实松手时刻」（systemUptime）。在松手事件到达 confirmModifierRelease 时立即记下，
-    /// 用来：①按真实「按下→松手」时长判定单击/长按，避免把 0.08s 确认延迟算进时长；
-    /// ②在 0.08s 确认窗口内压制 hold 升级，防止临界单击被升级成长按后立刻停（胶囊一闪而过）。
+    /// 用来：①按真实「按下→松手」时长判定单击/长按，避免把确认延迟算进时长；
+    /// ②在确认窗口内压制 hold 升级，防止临界单击被升级成长按后立刻停（胶囊一闪而过）。
     /// 每次新一轮按下（handleModifierPress）清空。
     private var releaseObservedAt: TimeInterval?
+    /// 这一次物理按下的时刻（systemUptime），用来判断松手是不是发生在「刚按下」那一段
+    private var pressStartedAt: TimeInterval?
 
     var debugLog: ((String) -> Void)?
     /// 手势定性：true=长按（松手即停）、false=单击切换（已锁定，需要再按/点按钮结束）
@@ -469,6 +480,7 @@ class HotkeyManager {
         holdPromotionWorkItem = nil
         wasModifierDown = true
         releaseObservedAt = nil   // 新一轮手势开始：清掉上一轮可能残留的松手时刻
+        pressStartedAt = now
 
         if case .latchedRecording = gestureState {
             gestureState = .idle
@@ -496,11 +508,15 @@ class HotkeyManager {
         scheduleHoldPromotion(startedAt: now)
     }
 
-    private func scheduleHoldPromotion(startedAt: TimeInterval) {
+    private func scheduleHoldPromotion(
+        startedAt: TimeInterval,
+        after delay: TimeInterval = RecordingHotkeyBehavior.holdThreshold
+    ) {
+        holdPromotionWorkItem?.cancel()
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             guard self.wasModifierDown else { return }
-            // 已观测到松手（正处于 0.08s 确认窗口内）→ 这是一次单击，绝不能升级成长按。
+            // 已观测到松手（正处于确认窗口内）→ 这是一次单击，绝不能升级成长按。
             // 否则临界单击（按住接近阈值）会被这里升级为 holdRecording，随后确认流程立刻 onStop，
             // 表现为「单击进入识别后立刻退出 / 胶囊一闪而过」。
             guard self.releaseObservedAt == nil else { return }
@@ -514,38 +530,52 @@ class HotkeyManager {
 
         holdPromotionWorkItem = workItem
         DispatchQueue.main.asyncAfter(
-            deadline: .now() + RecordingHotkeyBehavior.holdThreshold,
+            deadline: .now() + max(0, delay),
             execute: workItem
         )
     }
 
     private func confirmModifierRelease() {
         pendingStopWorkItem?.cancel()
-        // 立即记下真实松手时刻（早于 0.08s 防抖确认）。用于按真实时长判定单击/长按，
+        // 立即记下真实松手时刻（早于防抖确认）。用于按真实时长判定单击/长按，
         // 并在确认窗口内压制 hold 升级（见 scheduleHoldPromotion 的 releaseObservedAt 守卫）。
-        releaseObservedAt = ProcessInfo.processInfo.systemUptime
+        let now = ProcessInfo.processInfo.systemUptime
+        releaseObservedAt = now
+        let isEarlyInPress = pressStartedAt.map { now - $0 < RecordingHotkeyBehavior.earlyPressWindow } ?? false
+        let confirmDelay = isEarlyInPress
+            ? RecordingHotkeyBehavior.earlyReleaseConfirmDelay
+            : RecordingHotkeyBehavior.releaseConfirmDelay
 
         let workItem = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
 
             let stillDown = self.isConfiguredHotkeyCurrentlyPressed()
-            self.debugLog?("release check: stillDown=\(stillDown) wasDown=\(self.wasModifierDown) state=\(self.gestureState.debugName)")
+            self.debugLog?("release check: stillDown=\(stillDown) wasDown=\(self.wasModifierDown) state=\(self.gestureState.debugName) wait=\(confirmDelay)")
 
-            // 误报松手（修饰键其实还按着，多见于 flag 抖动）：撤销这次松手记录，
+            // 误报松手（键其实还按着 / 已经按回去了，多见于 flag 抖动、按得慢键没压实）：撤销这次松手记录，
             // 让长按升级照常进行，真正松手时再重新记一次。
             guard !stillDown else {
                 self.releaseObservedAt = nil
+                self.resumeHoldPromotionIfNeeded()
                 return
             }
 
             self.wasModifierDown = false
-            // 用真实松手时刻判定，而不是「确认 work item 执行时刻」（后者比真实松手晚 0.08s+，
+            // 用真实松手时刻判定，而不是「确认 work item 执行时刻」（后者比真实松手晚一个确认窗口，
             // 会把单击时长算大、把单击误判成长按）。
             self.finishModifierRelease(at: self.releaseObservedAt ?? ProcessInfo.processInfo.systemUptime)
         }
 
         pendingStopWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.08, execute: workItem)
+        DispatchQueue.main.asyncAfter(deadline: .now() + confirmDelay, execute: workItem)
+    }
+
+    /// 松手被判成误报后：确认窗口里被压下去的长按升级要补上（到点立即升级，没到点按剩余时间排上），
+    /// 否则手势会一直停在「按下未定性」。
+    private func resumeHoldPromotionIfNeeded() {
+        guard case .pressing(let startedAt, _) = gestureState else { return }
+        let elapsed = ProcessInfo.processInfo.systemUptime - startedAt
+        scheduleHoldPromotion(startedAt: startedAt, after: RecordingHotkeyBehavior.holdThreshold - elapsed)
     }
 
     private func finishModifierRelease(at now: TimeInterval) {
@@ -594,6 +624,111 @@ class HotkeyManager {
         wasModifierDown = isConfiguredHotkeyCurrentlyPressed()
         gestureState = .idle
         releaseObservedAt = nil
+        pressStartedAt = nil
         debugLog?("hotkey settings changed: shortcut=\(configuredShortcut.debugName) tapToggle=\(tapToggleEnabled)")
+    }
+}
+
+/// 录音期间按 Esc 取消，而且 Esc 只给 Typefree、不传给前台 App（工单 #1019）。
+///
+/// 以前 Esc 走的是全局监听：只能「旁听」，按键照样落到前台 App（可能把对方的弹窗、全屏、编辑状态也退掉了），
+/// 而且只在「按住快捷键录音」时认，单击开始的录音、鼠标长按录音都不认。
+/// 现在录音期间开一个系统级按键拦截：Esc 按下 → 取消录音并吞掉这次按键（连同它的抬起），别的键原样放行。
+/// 不录音时拦截是关着的，对任何按键都没有影响。建拦截失败（没有辅助功能权限）时退回老的旁听方式。
+final class EscapeInterceptor {
+    var onEscape: (() -> Void)?
+    var debugLog: ((String) -> Void)?
+
+    private var tap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var active = false
+    /// 吞掉了 Esc 按下，等着把对应的抬起也吞掉——否则前台 App 会收到一个孤零零的抬起
+    private var swallowingKeyUp = false
+    private var pendingDeactivate: DispatchWorkItem?
+
+    private static let escapeKeyCode: Int64 = 53
+
+    /// 录音开始时调用。返回拦截是否生效（false = 没权限等原因，调用方保留老的旁听方式）。
+    @discardableResult
+    func activate() -> Bool {
+        pendingDeactivate?.cancel()
+        pendingDeactivate = nil
+        guard ensureTap(), let tap else { return false }
+        active = true
+        CGEvent.tapEnable(tap: tap, enable: true)
+        return true
+    }
+
+    /// 录音结束时调用。刚吞掉 Esc 按下、抬起还没来时稍等一下再关，把抬起也吞掉。
+    func deactivate() {
+        guard active else { return }
+        if swallowingKeyUp {
+            let work = DispatchWorkItem { [weak self] in self?.shutOff() }
+            pendingDeactivate = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6, execute: work)
+        } else {
+            shutOff()
+        }
+    }
+
+    private func shutOff() {
+        pendingDeactivate = nil
+        active = false
+        swallowingKeyUp = false
+        if let tap { CGEvent.tapEnable(tap: tap, enable: false) }
+    }
+
+    private func ensureTap() -> Bool {
+        if tap != nil { return true }
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue) | CGEventMask(1 << CGEventType.keyUp.rawValue)
+        let callback: CGEventTapCallBack = { _, type, event, userInfo in
+            guard let userInfo else { return Unmanaged.passUnretained(event) }
+            let me = Unmanaged<EscapeInterceptor>.fromOpaque(userInfo).takeUnretainedValue()
+            return me.handle(type: type, event: event)
+        }
+        guard let created = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: mask,
+            callback: callback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) else {
+            debugLog?("Esc 拦截建不起来（多半没有辅助功能权限），退回旁听方式")
+            return false
+        }
+        tap = created
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, created, 0)
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        runLoopSource = source
+        CGEvent.tapEnable(tap: created, enable: false)
+        return true
+    }
+
+    private func handle(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        // 系统嫌回调太慢 / 用户输入时会把拦截关掉：录音中就重新打开
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if active, let tap { CGEvent.tapEnable(tap: tap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard event.getIntegerValueField(.keyboardEventKeycode) == Self.escapeKeyCode else {
+            return Unmanaged.passUnretained(event)
+        }
+        if type == .keyUp {
+            guard swallowingKeyUp else { return Unmanaged.passUnretained(event) }
+            swallowingKeyUp = false
+            if pendingDeactivate != nil {
+                pendingDeactivate?.cancel()
+                shutOff()
+            }
+            return nil
+        }
+        guard active else { return Unmanaged.passUnretained(event) }
+        swallowingKeyUp = true
+        if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+            debugLog?("Esc during recording → cancel（按键已拦下，不传给前台 App）")
+            DispatchQueue.main.async { [weak self] in self?.onEscape?() }
+        }
+        return nil
     }
 }

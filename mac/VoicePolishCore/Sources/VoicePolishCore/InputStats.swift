@@ -58,8 +58,8 @@ public final class InputStats {
                 .containerURL(forSecurityApplicationGroupIdentifier: "group.com.voicepolish.shared")?
                 .appendingPathComponent("input_stats.json")
             #else
-            let configDir = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".config/voicepolish")
+            // 跟配置目录走（默认 ~/.config/voicepolish，写不进时 VoicePolishConfig 会退到 Application Support）
+            let configDir = VoicePolishConfig.shared.configDirectoryURL
             try? FileManager.default.createDirectory(at: configDir, withIntermediateDirectories: true)
             self.fileURL = configDir.appendingPathComponent("input_stats.json")
             #endif
