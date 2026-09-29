@@ -28,6 +28,11 @@ public final class VoicePolishPipeline {
     /// macOS 设置它以保留历史音频；iOS 留 nil（不保留）。是否真正保存由调用方（含"保留音频"开关）决定。
     public var audioSaver: ((_ samples: [Float], _ id: String) -> String?)?
 
+    /// 正在处理的这一次（用 entryID 当令牌）。取消 / 超时放弃后置空，之后晚到的识别、润色结果一律丢掉，
+    /// 不再回调 UI、不写历史——工单 #1024：网络卡住时用户按 Esc 或等到超时，旧结果不能过几分钟又冒出来打字。
+    private var activeEntryID: String?
+    private let activeLock = NSLock()
+
     // 依赖的组件
     private let aiPolisher: AIPolisher
     private let cloudTranscriber: CloudASRTranscriber
@@ -43,6 +48,49 @@ public final class VoicePolishPipeline {
         self.omniTranscriber = omniTranscriber ?? OmniTranscriber()
     }
 
+    // MARK: - 取消
+
+    /// 放弃正在处理的这一次：之后它的结果都不再回调、不写历史。返回是否真的有一次在处理。
+    @discardableResult
+    public func cancelCurrent() -> Bool {
+        activeLock.lock(); defer { activeLock.unlock() }
+        let had = activeEntryID != nil
+        activeEntryID = nil
+        return had
+    }
+
+    private func begin(_ entryID: String) {
+        activeLock.lock(); activeEntryID = entryID; activeLock.unlock()
+    }
+
+    private func isActive(_ entryID: String) -> Bool {
+        activeLock.lock(); defer { activeLock.unlock() }
+        return activeEntryID == entryID
+    }
+
+    /// 只有还在处理的那一次才回调 UI；结束态（done/error/empty）回调后这一次就算结束
+    private func emit(_ state: State, _ entryID: String) {
+        guard isActive(entryID) else {
+            log("Pipeline result dropped (cancelled): \(Self.stateName(state))")
+            return
+        }
+        switch state {
+        case .done, .error, .empty: _ = cancelCurrent()
+        case .transcribing, .polishing: break
+        }
+        onStateChange?(state)
+    }
+
+    private static func stateName(_ state: State) -> String {
+        switch state {
+        case .transcribing: return "transcribing"
+        case .polishing: return "polishing"
+        case .done: return "done"
+        case .error: return "error"
+        case .empty: return "empty"
+        }
+    }
+
     // MARK: - 主入口
 
     /// 处理录音样本，完成后通过 onStateChange 回调
@@ -56,8 +104,9 @@ public final class VoicePolishPipeline {
         }
 
         let entryID = UUID().uuidString  // 该条历史的稳定 ID，音频文件与日志共用
+        begin(entryID)
         log("Pipeline started: mode=\(mode.debugName), samples=\(samples.count) (\(String(format: "%.1f", Float(samples.count) / 16000.0))s)")
-        onStateChange?(.transcribing(message: mode.transcriptionOverlayMessage))
+        emit(.transcribing(message: mode.transcriptionOverlayMessage), entryID)
 
         transcribe(samples: samples, using: mode, pipelineStart: pipelineStart, entryID: entryID)
     }
@@ -67,10 +116,11 @@ public final class VoicePolishPipeline {
     public func processTranscribedText(_ rawText: String, samples: [Float], mode: ProcessingMode) {
         let pipelineStart = Date()
         let entryID = UUID().uuidString
+        begin(entryID)
         let trimmed = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
             log("Streaming produced empty text")
-            onStateChange?(.empty)
+            emit(.empty, entryID)
             return
         }
         log("Streaming transcription done, chars=\(trimmed.count), entering polish")
@@ -93,12 +143,12 @@ public final class VoicePolishPipeline {
                 case .failure(let error):
                     if case OmniTranscriber.OmniError.noAPIKey = error {
                         self.log("OmniTranscriber not configured, falling back to cloudOnly")
-                        self.onStateChange?(.transcribing(message: ProcessingMode.cloudOnly.transcriptionOverlayMessage))
+                        self.emit(.transcribing(message: ProcessingMode.cloudOnly.transcriptionOverlayMessage), entryID)
                         self.transcribe(samples: samples, using: .cloudOnly, pipelineStart: pipelineStart, entryID: entryID)
                         return
                     }
                     self.log("Omni failed in \(String(format: "%.1f", elapsed))s: \(error)")
-                    self.onStateChange?(.error(message: "全模态识别失败"))
+                    self.emit(.error(message: "全模态识别失败"), entryID)
                 }
             }
             return
@@ -149,6 +199,10 @@ public final class VoicePolishPipeline {
                                     pipelineStart: Date,
                                     entryID: String) {
         let asrError = error as? CloudASRTranscriber.TranscriptionError
+        guard isActive(entryID) else {
+            log("Cloud ASR failure ignored (cancelled)")
+            return
+        }
 
         // 临时性错误（服务器繁忙/超时）：原地重试同一版本一次（不换版本）
         if let e = asrError, e.isRetriableInPlace, !inPlaceRetried {
@@ -162,19 +216,17 @@ public final class VoicePolishPipeline {
         // 服务端判定无有效语音（静音 / 太短）：当作"无内容"，安静收起 + 记一条空历史，不报红框。
         if case .noSpeech? = asrError {
             log("No speech detected, treating as empty result")
-            onStateChange?(.empty)
+            emit(.empty, entryID)
             return
         }
 
         // 其它失败：如实报错，不自动切换识别版本。
         let message = asrError?.errorDescription ?? "云端识别失败"
-        // 较长录音（≥20s）失败：把音频留进历史（标记可「重新转写」），避免用户白录，并在提示里说明。
-        let audioSeconds = Double(samples.count) / 16000.0
-        if audioSeconds >= 20 {
-            preserveFailedAttempt(samples: samples, entryID: entryID, pipelineStart: pipelineStart)
-            onStateChange?(.error(message: "\(message)。这段录音已存到历史，可「重新转写」重试。"))
+        // 识别失败的录音不论长短都留进历史（可「重试」），避免用户白说（工单 #1024：原先只留 ≥20s 的，18 秒的话就丢了）。
+        if preserveFailedAttempt(samples: samples, entryID: entryID, pipelineStart: pipelineStart) {
+            emit(.error(message: "\(message) · 录音已存进历史，可点「···」→「重试」"), entryID)
         } else {
-            onStateChange?(.error(message: message))
+            emit(.error(message: message), entryID)
         }
     }
 
@@ -216,7 +268,7 @@ public final class VoicePolishPipeline {
             finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
             return
         }
-        onStateChange?(.polishing(message: "→ \(target.tag)"))
+        emit(.polishing(message: "→ \(target.tag)"), entryID)
         let polishStart = Date()
         aiPolisher.polishCloudASROutput(text: text, outputLanguage: target) { [weak self] result in
             guard let self = self else { return }
@@ -224,13 +276,13 @@ public final class VoicePolishPipeline {
             switch result {
             case .success(let polished) where !polished.isEmpty:
                 self.log("Output in \(target.id) done in \(String(format: "%.1f", polishTime))s, chars=\(polished.count)")
-                self.onOutputLanguageApplied?(target, command)
+                if self.isActive(entryID) { self.onOutputLanguageApplied?(target, command) }
                 self.finishProcessing(with: polished, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
             case .success:
                 self.finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
             case .failure(let err):
                 self.log("Output in \(target.id) failed in \(String(format: "%.1f", polishTime))s: \(err), fallback to original")
-                if case AIPolisher.PolishError.noAPIKey = err {} else {
+                if case AIPolisher.PolishError.noAPIKey = err {} else if self.isActive(entryID) {
                     let reason = (err as? LocalizedError)?.errorDescription ?? "\(err)"
                     self.onPolishFailed?(reason)
                 }
@@ -267,7 +319,7 @@ public final class VoicePolishPipeline {
         }
 
         log("Cloud-only long text (\(charCount) chars), polishing")
-        onStateChange?(.polishing(message: mode.polishOverlayMessage))
+        emit(.polishing(message: mode.polishOverlayMessage), entryID)
         let polishStart = Date()
         aiPolisher.polishCloudASROutput(text: rawText) { [weak self] result in
             guard let self = self else { return }
@@ -282,7 +334,9 @@ public final class VoicePolishPipeline {
                 // 润色失败：文字照常输出（不丢用户的话），但提醒一次"没润色 + 原因"。
                 // noAPIKey（用户选了不润色/没配 key）是正常状态，不提醒；其余（额度/欠费/网络/限流）都提醒。
                 // 例外：没选「不优化」、只是没填润色 Key 且试用已结束的人，每天提醒一次，不然他不知道为什么文字没整理。
-                if case AIPolisher.PolishError.noAPIKey = err {
+                if !self.isActive(entryID) {
+                    // 已取消：不提醒，finishProcessing 里也会丢掉
+                } else if case AIPolisher.PolishError.noAPIKey = err {
                     if let hint = Self.dailyPolishUnconfiguredHint() { self.onPolishFailed?(hint) }
                 } else {
                     let reason = (err as? LocalizedError)?.errorDescription ?? "\(err)"
@@ -315,9 +369,13 @@ public final class VoicePolishPipeline {
     // MARK: - 完成处理
 
     private func finishProcessing(with finalText: String?, rawASR: String? = nil, pipelineStart: Date, samples: [Float], entryID: String) {
+        guard isActive(entryID) else {
+            log("Pipeline result dropped (cancelled): done")
+            return
+        }
         guard let finalText = finalText, !finalText.isEmpty else {
             log(String(format: "Pipeline took %.0f ms, no output", Date().timeIntervalSince(pipelineStart) * 1000))
-            onStateChange?(.empty)
+            emit(.empty, entryID)
             return
         }
 
@@ -331,7 +389,7 @@ public final class VoicePolishPipeline {
 
         // 先把文本回灌给 UI（粘贴即时），再后台存音频 + 写日志，避免编码拖慢粘贴。
         log(String(format: "Pipeline completed in %.0f ms", Double(durationMs)))
-        onStateChange?(.done(text: correctedText))
+        emit(.done(text: correctedText), entryID)
 
         let savedASR = rawASR ?? correctedText
         let saver = audioSaver
@@ -348,10 +406,11 @@ public final class VoicePolishPipeline {
         }
     }
 
-    /// 较长录音识别失败时，把音频留进历史并标记为可重试，避免用户白录。
+    /// 识别失败时，把音频留进历史并标记为可重试，避免用户白录。返回是否会保留（有 audioSaver）。
     /// 依赖 audioSaver（macOS 有、iOS 为 nil）；编码失败 / 关闭保留 则不留。
-    private func preserveFailedAttempt(samples: [Float], entryID: String, pipelineStart: Date) {
-        guard let saver = audioSaver else { return }
+    @discardableResult
+    private func preserveFailedAttempt(samples: [Float], entryID: String, pipelineStart: Date) -> Bool {
+        guard let saver = audioSaver else { return false }
         let durationMs = Int(Date().timeIntervalSince(pipelineStart) * 1000)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self = self else { return }
@@ -363,8 +422,15 @@ public final class VoicePolishPipeline {
                 id: entryID,
                 audioFile: audioFile
             )
-            self.log("Preserved failed long recording to history (\(audioFile)) for retry")
+            self.log("Preserved failed recording to history (\(audioFile)) for retry")
         }
+        return true
+    }
+
+    /// 调用方放弃了这次识别（总等待封顶到点）：录音另存一条「识别失败、可重试」的历史。返回是否会保留。
+    /// 调用方应先 cancelCurrent()，免得这一次过后又自己写一条。
+    public func preserveFailedRecording(samples: [Float], startedAt: Date) -> Bool {
+        preserveFailedAttempt(samples: samples, entryID: UUID().uuidString, pipelineStart: startedAt)
     }
 
     // MARK: - 工具方法

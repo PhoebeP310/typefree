@@ -80,6 +80,75 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
         wait(for: [exp], timeout: 3)
     }
 
+    // MARK: - 尾巴识别失败（工单 #1024 同类：以前悄悄只给前半段，后半截话凭空消失）
+
+    private struct FakeError: Error {}
+
+    /// 尾巴第一次失败、第二次成功 → 照常拼全文
+    func testTailFailureRetriesOnce() {
+        var tailCalls = 0
+        let lock = NSLock()
+        let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
+            DispatchQueue.global().async { done(.success("C")) }
+        }, tailTranscriber: { _, done in
+            lock.lock(); tailCalls += 1; let n = tailCalls; lock.unlock()
+            DispatchQueue.global().async { done(n == 1 ? .failure(FakeError()) : .success("尾")) }
+        })
+        let snapshot = speechWithPauses(blocks: 6)
+        drainCommits(session, snapshot)
+        let exp = expectation(description: "finish")
+        session.finish(finalSamples: snapshot) { result in
+            guard case .success(let text) = result else { return XCTFail("重试后应成功") }
+            XCTAssertTrue(text.hasSuffix("尾"))
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+        XCTAssertEqual(tailCalls, 2)
+    }
+
+    /// 尾巴两次都失败、前面已有文字 → 不再悄悄当成功，交出前半段让上层提醒
+    func testTailFailsTwiceReturnsPartialError() {
+        let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
+            DispatchQueue.global().async { done(.success("C")) }
+        }, tailTranscriber: { _, done in
+            DispatchQueue.global().async { done(.failure(FakeError())) }
+        })
+        let snapshot = speechWithPauses(blocks: 6)
+        drainCommits(session, snapshot)
+        XCTAssertFalse(session.committedText.isEmpty)
+        let exp = expectation(description: "finish")
+        session.finish(finalSamples: snapshot) { result in
+            guard case .failure(let error) = result,
+                  let partial = error as? StreamingTranscriptionSession.PartialResultError else {
+                return XCTFail("应返回 PartialResultError")
+            }
+            XCTAssertFalse(partial.text.isEmpty)
+            XCTAssertEqual(partial.text, String(repeating: "C", count: partial.text.count))
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+    }
+
+    /// 前面什么都没识别出来时尾巴失败 → 直接报错，不重试（调用方会整段重识别）
+    func testTailFailureWithoutCommitReportsError() {
+        var tailCalls = 0
+        let lock = NSLock()
+        let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
+            DispatchQueue.global().async { done(.success("C")) }
+        }, tailTranscriber: { _, done in
+            lock.lock(); tailCalls += 1; lock.unlock()
+            DispatchQueue.global().async { done(.failure(FakeError())) }
+        })
+        let exp = expectation(description: "finish")
+        session.finish(finalSamples: speech(5)) { result in
+            guard case .failure(let error) = result else { return XCTFail("应失败") }
+            XCTAssertFalse(error is StreamingTranscriptionSession.PartialResultError)
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+        XCTAssertEqual(tailCalls, 1)
+    }
+
     // MARK: - 连续说话无停顿 → 不提交，退化为整段(仅尾巴)
 
     func testNoPauseFallsBackToTailOnly() {

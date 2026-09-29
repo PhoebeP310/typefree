@@ -43,6 +43,16 @@ public final class StreamingTranscriptionSession {
     private var finished = false
     private var pendingFinish: (finalSamples: [Float], completion: (Result<String, Error>) -> Void)?
 
+    /// 尾巴两次都没识别出来、但前面已经识别出一部分：通过 finish 的 failure 交出前半段，
+    /// 由调用方照常输出并提醒「后半段没识别出来」（以前是悄悄只返回前半段，后半截话凭空消失）。
+    public struct PartialResultError: Error {
+        public let text: String
+        public let underlying: Error
+    }
+
+    /// 目前已识别出的前半段（等太久要放弃时，调用方可先把这部分交给用户）
+    public var committedText: String { queue.sync { Self.join(committedTexts) } }
+
     public init(chunkTranscriber: @escaping ChunkTranscriber, tailTranscriber: @escaping TailTranscriber) {
         self.chunkTranscriber = chunkTranscriber
         self.tailTranscriber = tailTranscriber
@@ -129,19 +139,26 @@ public final class StreamingTranscriptionSession {
             return
         }
 
+        transcribeTail(tail, committed: committed, retriesLeft: 1, completion: completion)
+    }
+
+    /// 尾巴失败：前面什么都没识别出来 → 如实报错（调用方会整段重识别）；
+    /// 前面已有文字 → 尾巴再试一次，还不行就用 PartialResultError 交出前半段。
+    private func transcribeTail(_ tail: [Float], committed: [String], retriesLeft: Int,
+                                completion: @escaping (Result<String, Error>) -> Void) {
         tailTranscriber(tail) { result in
             self.queue.async {
                 switch result {
                 case .success(let tailText):
                     completion(.success(Self.join(committed + [tailText])))
+                case .failure(let error) where committed.isEmpty:
+                    completion(.failure(error))
+                case .failure(let error) where retriesLeft > 0:
+                    self.log("stream tail failed (\(error)), retrying once")
+                    self.transcribeTail(tail, committed: committed, retriesLeft: retriesLeft - 1, completion: completion)
                 case .failure(let error):
-                    // 尾巴失败：若前面有已识别文字，别浪费，连同错误交给上层决定；
-                    // 这里保持简单——有已提交内容则返回它们（附带尾巴缺失），否则如实报错。
-                    if committed.isEmpty {
-                        completion(.failure(error))
-                    } else {
-                        completion(.success(Self.join(committed)))
-                    }
+                    self.log("stream tail failed again, returning first part only")
+                    completion(.failure(PartialResultError(text: Self.join(committed), underlying: error)))
                 }
             }
         }

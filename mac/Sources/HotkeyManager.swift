@@ -726,7 +726,7 @@ final class EscapeInterceptor {
         guard active else { return Unmanaged.passUnretained(event) }
         swallowingKeyUp = true
         if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
-            debugLog?("Esc during recording → cancel（按键已拦下，不传给前台 App）")
+            debugLog?("Esc → cancel（按键已拦下，不传给前台 App）")
             DispatchQueue.main.async { [weak self] in self?.onEscape?() }
         }
         return nil

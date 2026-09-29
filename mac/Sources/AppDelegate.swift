@@ -1307,17 +1307,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
     private var isRecording = false {
         didSet {
             guard oldValue != isRecording else { return }
-            // 工单 #1019：录音期间 Esc 取消，且按键不传给前台 App
-            if isRecording { escapeInterceptor.activate() } else { escapeInterceptor.deactivate() }
+            updateEscapeInterceptor()
         }
     }
     private lazy var escapeInterceptor: EscapeInterceptor = {
         let interceptor = EscapeInterceptor()
         interceptor.debugLog = { [weak self] msg in self?.debugLog(msg) }
-        interceptor.onEscape = { [weak self] in self?.cancelRecording() }
+        interceptor.onEscape = { [weak self] in
+            guard let self else { return }
+            if self.isRecording { self.cancelRecording() } else { self.cancelProcessing() }
+        }
         return interceptor
     }()
+    /// 工单 #1019：录音期间 Esc 取消；工单 #1024：识别 / 整理中（文字还没打出来）也能按 Esc 取消。按键都不传给前台 App。
+    private var escapeInterceptorWanted = false
+    private func updateEscapeInterceptor() {
+        let wanted = isRecording || processingSamples != nil
+        guard wanted != escapeInterceptorWanted else { return }
+        escapeInterceptorWanted = wanted
+        if wanted { escapeInterceptor.activate() } else { escapeInterceptor.deactivate() }
+    }
     private var isProcessing = false
+    /// 正在识别 / 整理的这段录音（听写才有；问 AI 不走这里）。非 nil 期间按 Esc 可取消，出字或报错后清空。
+    private var processingSamples: [Float]? {
+        didSet { updateEscapeInterceptor() }
+    }
+    private var processingStartedAt = Date()
+    /// 每开始处理一段录音 +1；取消 / 放弃时也 +1，晚到的边录边发结果对不上号就丢掉
+    private var processingGeneration = 0
+    /// 识别阶段的总等待封顶（工单 #1024：网络卡住时以前每步干等一分钟、叠加重试近 3 分钟）
+    private var recognitionWatchdog: DispatchWorkItem?
+    /// 这次边录边发的会话：等太久放弃时，先把已识别出的前半段交给用户
+    private var processingSession: StreamingTranscriptionSession?
+    /// 只识别出了前半段：出字后提醒一次（后半截以前会悄悄丢掉）
+    private var pendingPartialHint: String?
+    private static let partialResultHint = "后半段没识别出来 · 整段录音在历史里，可点「···」→「重试」"
     /// 这次录音放过开始提示音没有：结束音只跟在开始音后面放（长按问 AI 没判出开口时两个都不放）
     private var didPlayStartCue = false
 
@@ -1740,6 +1764,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                 return
             }
 
+            DispatchQueue.main.async {
+                let generation = self.beginProcessing(samples: samples)
+                self.processingSession = session
+                DispatchQueue.global(qos: .userInitiated).async {
+                    self.runProcessing(samples: samples, session: session, mode: mode, generation: generation)
+                }
+            }
+        }
+    }
+
+    /// 松手后的识别 + 整理。generation 对不上（期间按 Esc 取消了 / 等太久放弃了）就不再往下走。
+    private func runProcessing(samples: [Float], session: StreamingTranscriptionSession?, mode: ProcessingMode, generation: Int) {
             guard let session = session else {
                 self.pipeline.process(samples: samples, mode: mode)  // omni / 未启用流式：原路径
                 return
@@ -1751,17 +1787,103 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             session.finish(finalSamples: samples) { [weak self] result in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
+                    guard generation == self.processingGeneration else {
+                        self.debugLog("Streaming result dropped (cancelled)")
+                        return
+                    }
                     switch result {
                     case .success(let rawText):
                         self.debugLog("Streaming finish success (\(rawText.count) chars)")
                         self.pipeline.processTranscribedText(rawText, samples: samples, mode: mode)
+                    case .failure(let error as StreamingTranscriptionSession.PartialResultError):
+                        // 尾巴两次没识别出来：前半段照常出字，并提醒后半段没出来（整段录音随这条记录进历史，可重试）
+                        self.debugLog("Streaming tail failed: \(error.underlying) — delivering first part (\(error.text.count) chars)")
+                        self.pendingPartialHint = Self.partialResultHint
+                        self.pipeline.processTranscribedText(error.text, samples: samples, mode: mode)
                     case .failure(let error):
                         self.debugLog("Streaming finish failed: \(error) — fallback to batch")
                         self.pipeline.process(samples: samples, mode: mode)
                     }
                 }
             }
+    }
+
+    /// 开始处理一段录音（主线程）：记下录音供 Esc 取消 / 放弃时留进历史，并开识别阶段的总等待封顶。
+    private func beginProcessing(samples: [Float]) -> Int {
+        processingGeneration += 1
+        processingSamples = samples
+        processingStartedAt = Date()
+        startRecognitionWatchdog(audioSeconds: Double(samples.count) / 16000.0)
+        return processingGeneration
+    }
+
+    /// 出字 / 报错 / 没内容 / 取消：这段录音处理完了
+    private func endProcessing() {
+        recognitionWatchdog?.cancel()
+        recognitionWatchdog = nil
+        processingSamples = nil
+        processingSession = nil
+    }
+
+    /// 识别阶段最多等多久：正常一两秒就出字；网络卡住时到点直接放弃，不再陪着一轮轮重试干等。
+    static func recognitionWaitCap(audioSeconds: Double) -> TimeInterval {
+        min(240, 25 + audioSeconds * 0.4)
+    }
+
+    private func startRecognitionWatchdog(audioSeconds: Double) {
+        recognitionWatchdog?.cancel()
+        let cap = Self.recognitionWaitCap(audioSeconds: audioSeconds)
+        let generation = processingGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.processingGeneration, let samples = self.processingSamples else { return }
+            self.debugLog("Recognition gave up after \(Int(cap))s (audio \(String(format: "%.1f", audioSeconds))s)")
+            self.pipeline.cancelCurrent()
+            self.processingGeneration += 1
+            // 边录边发已识别出前半段：先把这部分交给用户（照常整理、出字），并提醒后半段没出来
+            if let partial = self.processingSession?.committedText, !partial.isEmpty {
+                self.debugLog("Delivering first part (\(partial.count) chars) after giving up")
+                self.processingSession = nil
+                self.recognitionWatchdog = nil
+                self.pendingPartialHint = Self.partialResultHint
+                self.pipeline.processTranscribedText(partial, samples: samples, mode: self.processingMode)
+                return
+            }
+            let kept = self.pipeline.preserveFailedRecording(samples: samples, startedAt: self.processingStartedAt)
+            self.endProcessing()
+            self.isProcessing = false
+            self.statusBar.setTitle("VP")
+            self.showError(kept ? "网络太慢，这段没识别出来 · 录音已存进历史，可点「···」→「重试」"
+                                : "网络太慢，这段没识别出来，请再说一次")
         }
+        recognitionWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + cap, execute: work)
+    }
+
+    /// 识别 / 整理中按 Esc：放弃这次（晚到的结果不会再打字），和录音中取消一样给 5 秒「撤销」。
+    private func cancelProcessing() {
+        guard isProcessing, let samples = processingSamples else {
+            debugLog("CANCEL processing ignored: nothing in progress")
+            return
+        }
+        debugLog("CANCEL processing (Esc), elapsed \(String(format: "%.1f", Date().timeIntervalSince(processingStartedAt)))s")
+        pipeline.cancelCurrent()
+        processingGeneration += 1
+        endProcessing()
+        pendingPolishWarning = nil
+        pendingOutputLanguageHint = nil
+        pendingPartialHint = nil
+        pendingOverlayHide?.cancel()
+        pendingOverlayHide = nil
+        isProcessing = false
+        statusBar.setTitle("VP")
+        overlayWindow.hide()
+        cancelledSamples = samples
+        cancelledWasAsk = false
+        cancelledSamplesTimer?.invalidate()
+        cancelledSamplesTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            self?.cancelledSamples = nil
+        }
+        overlayWindow.showCancelledCapsule()
     }
 
     /// 「长按问 AI」松手：只识别，不润色不粘贴，把识别出的问题交给 AI，答案弹在按下点附近。
@@ -2023,6 +2145,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             overlayWindow.show(state: .processing(message: "→ AI"))
             askAI(with: samples, followUp: false, speechUnconfirmed: false)
         } else {
+            _ = beginProcessing(samples: samples)
             pipeline.process(samples: samples, mode: processingMode)
         }
     }
@@ -2640,15 +2763,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
 
     private func handlePipelineState(_ state: VoicePolishPipeline.State) {
         DispatchQueue.main.async {
+            // 已取消 / 已放弃（刚好和结果擦肩而过）：不再显示、不打字
+            guard self.isProcessing else {
+                self.debugLog("Pipeline state ignored: not processing")
+                return
+            }
             switch state {
             case .transcribing(let message):
                 self.overlayWindow.show(state: .processing(message: message))
 
             case .polishing(let message):
+                // 识别完成：总等待封顶只管识别，整理慢了会退回原文（润色失败照常出字）
+                self.recognitionWatchdog?.cancel()
+                self.recognitionWatchdog = nil
                 self.overlayWindow.show(state: .processing(message: message))
 
             case .done(let text):
                 self.debugLog("Pipeline done received on main chars=\(text.count)")
+                self.endProcessing()
                 self.isProcessing = false
                 self.statusBar.setTitle("VP")
                 let frontmostAppName = self.currentFrontmostAppName()
@@ -2698,6 +2830,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                                          countsTowardFreeQuota: countsTowardQuota)
                 AutoLearnScheduler.shared.noteRecordDelivered()
 
+                if let hint = self.pendingPartialHint {
+                    self.pendingPartialHint = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.queueHint(hint) }
+                }
+
                 // 润色失败（额度用尽/欠费等）：文字已照常输出，但明确提醒一次，别让额度耗尽被静默跳过。
                 if let warning = self.pendingPolishWarning {
                     self.pendingPolishWarning = nil
@@ -2722,11 +2859,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                 }
 
             case .error(let message):
+                self.pendingPartialHint = nil
+                self.endProcessing()
                 self.isProcessing = false
                 self.statusBar.setTitle("VP")
                 self.showError(message)
 
             case .empty:
+                self.pendingPartialHint = nil
+                self.endProcessing()
                 self.recordEmptyResult()
             }
         }
