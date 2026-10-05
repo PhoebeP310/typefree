@@ -19,6 +19,17 @@ public struct ActivityRhythm: Equatable {
 
     public static let weekdayNames = ["", "周日", "周一", "周二", "周三", "周四", "周五", "周六"]
 
+    // 本地改动：节律圆点按字数分深浅档。0 = 没用（空心小圈），1…4 = 相对窗口内最多那天的比例，
+    // 阈值 0.25 / 0.5 / 0.75（≤0.25 为 1 档，>0.75 为 4 档）。
+    public static func intensityLevel(chars: Int, maxChars: Int) -> Int {
+        guard chars > 0, maxChars > 0 else { return 0 }
+        let r = Double(chars) / Double(maxChars)
+        if r > 0.75 { return 4 }
+        if r > 0.5 { return 3 }
+        if r > 0.25 { return 2 }
+        return 1
+    }
+
     public static func compute(records: [DailyRecord], today: Date = Date(), days: Int = 42,
                                calendar: Calendar = .current) -> ActivityRhythm {
         let f = DateFormatter()

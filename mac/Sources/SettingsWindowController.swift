@@ -1487,7 +1487,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         // Groups
         let historyCount = quickHistoryLineCount()
-        let vocabCount = vocabularyEntries.count
+        // 本地改动：角标改为识别时实际带上的用户词数（hot_words + 词库正确词，去重、截断后，不含内置词），
+        // 原来只数 term_corrections，自动同步的热词不算在内
+        let vocabCount = PersonalVocabulary.currentPersonalWordCount()
 
         let unread = SupportChatService.shared.unreadCount
         let groups: [(String?, [(Page, String?)])] = [
@@ -2123,19 +2125,26 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.setCustomSpacing(16, after: hero)
 
         // Stats
+        // 本地改动：四张卡（今日/本周/本月/累计）改为三张：今日 / 本周 / 上周同期（副标题给本周环比）
         let stats = InputStats.shared
         let today = stats.today()
         let week = stats.currentWeekTotal()
-        let month = stats.currentMonthTotal()
-        let allTime = stats.allTimeTotal()
+        let lastWeek = stats.lastWeekSamePeriodTotal()
         let statsGrid = makeStatsGrid([
-            ("今日", today.charCount, "\(today.sessionCount) 次会话"),
+            ("今日", today.charCount, "\(today.sessionCount) 次"),
             ("本周", week.chars, "\(week.sessions) 次"),
-            ("本月", month.chars, "\(month.sessions) 次"),
-            ("累计", allTime.chars, "\(allTime.sessions) 次"),
+            ("上周同期", lastWeek.chars, InputStats.weekOverWeekText(current: week.chars, previous: lastWeek.chars)),
         ])
         stack.addArrangedSubview(statsGrid)
-        stack.setCustomSpacing(24, after: statsGrid)
+
+        // 本地改动：按应用拆分（今天没数据就看本周，本周也没有就不显示）
+        if let appCard = makeAppSplitCard(stats: stats) {
+            stack.setCustomSpacing(10, after: statsGrid)
+            stack.addArrangedSubview(appCard)
+            stack.setCustomSpacing(24, after: appCard)
+        } else {
+            stack.setCustomSpacing(24, after: statsGrid)
+        }
 
         // 近 6 周一行圆点 + 连续天数（Ray 2026-09-15 选的方案三；不带标题）
         let rhythmCard = makeRhythmCard(stats: stats)
@@ -2148,6 +2157,127 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let healthCard = makeHealthCard()
         stack.addArrangedSubview(healthCard)
         // 反馈搬到侧栏「反馈」页（对话式，能附截图、能收到回复）
+    }
+
+    // 本地改动：首页「今日按应用 / 本周按应用」卡片：一条横向堆叠条 + 每个应用一行图例（名称、字数、占比）。
+    // 数据取自历史记录（最多 500 条），字数口径同 InputStats：交付文字 output 的字数，空则用 asr。
+    private func makeAppSplitCard(stats: InputStats) -> NSView? {
+        let entries = historyStore.load(limit: 500)
+        let df = DateFormatter()
+        df.dateFormat = "yyyy-MM-dd"
+        df.locale = Locale(identifier: "en_US_POSIX")
+        let todayStr = df.string(from: Date())
+        var title = "今日按应用"
+        var slices = AppUsageSplit.compute(entries: entries, from: todayStr, to: todayStr)
+        if slices.isEmpty, let weekStart = stats.currentWeekStartString() {
+            title = "本周按应用"
+            slices = AppUsageSplit.compute(entries: entries, from: weekStart, to: todayStr)
+        }
+        let total = slices.reduce(0) { $0 + $1.chars }
+        guard total > 0 else { return nil }
+
+        // 颜色只用主题强调色按透明度分深浅，第一名最深，「其他」最浅
+        let alphas: [CGFloat] = [1.0, 0.7, 0.48, 0.32]
+        func color(_ i: Int, _ s: AppUsageSplit.Slice) -> NSColor {
+            if s.app == AppUsageSplit.otherName { return theme.accent.withAlphaComponent(0.16) }
+            return theme.accent.withAlphaComponent(alphas[min(i, alphas.count - 1)])
+        }
+
+        let card = makeCard()
+        let column = NSStackView()
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 8
+        column.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
+
+        let eyebrow = label(title, size: 11, weight: .medium, color: theme.text3)
+        column.addArrangedSubview(eyebrow)
+        column.setCustomSpacing(10, after: eyebrow)
+
+        // 横向堆叠条：各段宽度按字数占比，段间留 2pt 缝
+        let bar = NSStackView()
+        bar.orientation = .horizontal
+        bar.spacing = 2
+        bar.distribution = .fill
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.wantsLayer = true
+        bar.layer?.cornerRadius = 4
+        bar.layer?.masksToBounds = true
+        bar.heightAnchor.constraint(equalToConstant: 10).isActive = true
+        var segments: [NSView] = []
+        for (i, s) in slices.enumerated() {
+            let seg = NSView()
+            seg.wantsLayer = true
+            seg.layer?.setAppearanceBackground(color(i, s))
+            seg.translatesAutoresizingMaskIntoConstraints = false
+            seg.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            seg.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            bar.addArrangedSubview(seg)
+            segments.append(seg)
+        }
+        // 以第一段为基准设比例约束（第一段字数最多，必大于 0）
+        if let first = segments.first {
+            for (i, seg) in segments.enumerated().dropFirst() {
+                let c = seg.widthAnchor.constraint(equalTo: first.widthAnchor,
+                                                   multiplier: CGFloat(slices[i].chars) / CGFloat(slices[0].chars))
+                c.priority = .defaultHigh
+                c.isActive = true
+            }
+        }
+        column.addArrangedSubview(bar)
+        bar.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -36).isActive = true
+        column.setCustomSpacing(12, after: bar)
+
+        // 图例：色块 + 应用名（过长截断）……字数 + 占比（固定不换行）
+        for (i, s) in slices.enumerated() {
+            let swatch = NSView()
+            swatch.wantsLayer = true
+            swatch.layer?.cornerRadius = 2
+            swatch.layer?.setAppearanceBackground(color(i, s))
+            swatch.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                swatch.widthAnchor.constraint(equalToConstant: 8),
+                swatch.heightAnchor.constraint(equalToConstant: 8),
+            ])
+
+            let name = label(s.app, size: 12, weight: .regular, color: theme.text2)
+            name.maximumNumberOfLines = 1
+            name.lineBreakMode = .byTruncatingTail
+            name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            name.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+            let chars = label("\(formatNumber(s.chars)) 字", size: 12, weight: .regular, color: theme.text)
+            chars.font = monoFont(size: 12, weight: .regular)
+            chars.maximumNumberOfLines = 1
+            chars.lineBreakMode = .byClipping
+            chars.setContentCompressionResistancePriority(.required, for: .horizontal)
+            chars.setContentHuggingPriority(.required, for: .horizontal)
+
+            let pctValue = Int((Double(s.chars) / Double(total) * 100).rounded())
+            let pct = label(pctValue == 0 ? "<1%" : "\(pctValue)%", size: 12, weight: .regular, color: theme.text3)
+            pct.font = monoFont(size: 12, weight: .regular)
+            pct.alignment = .right
+            pct.maximumNumberOfLines = 1
+            pct.lineBreakMode = .byClipping
+            pct.setContentCompressionResistancePriority(.required, for: .horizontal)
+            pct.translatesAutoresizingMaskIntoConstraints = false
+            pct.widthAnchor.constraint(equalToConstant: 40).isActive = true
+
+            let row = NSStackView()
+            row.orientation = .horizontal
+            row.alignment = .centerY
+            row.spacing = 8
+            row.distribution = .fill
+            row.addArrangedSubview(swatch)
+            row.addArrangedSubview(name)
+            row.addArrangedSubview(chars)
+            row.addArrangedSubview(pct)
+            column.addArrangedSubview(row)
+            row.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -36).isActive = true
+        }
+
+        mount(column, in: card)
+        return card
     }
 
     /// 「节律」卡片：一行墨点（RhythmStripView）+ 一排小标签（连续 / 最长 / 活跃天数 / 最常周几）
@@ -6258,7 +6388,44 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let autoLearn = makeAutoLearnCard()
         stack.addArrangedSubview(autoLearn)
         stack.setCustomSpacing(8, after: autoLearn)
-        stack.addArrangedSubview(makeBuiltinHotWordsCard())
+        let builtinCard = makeBuiltinHotWordsCard()
+        stack.addArrangedSubview(builtinCard)
+
+        // 本地改动：只读展示自动同步进来的 hot_words（为空不显示）
+        if let syncedCard = makeSyncedHotWordsCard() {
+            stack.setCustomSpacing(8, after: builtinCard)
+            stack.addArrangedSubview(syncedCard)
+        }
+    }
+
+    // 本地改动：「自动同步的热词」只读卡片，内容为 config 的 hot_words 全量，用「、」连成可换行的文本
+    private func makeSyncedHotWordsCard() -> NSView? {
+        let words = (config.loadConfig()["hot_words"] as? [String] ?? [])
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        guard !words.isEmpty else { return nil }
+
+        let card = makeCard()
+        let title = label("自动同步的热词（\(words.count) 个）", size: 14, weight: .medium, color: theme.text)
+        let desc = makeWrappingLabel("每周一 09:00 从工作资料自动更新，识别时优先认出这些词。要增删请改 terms.txt（业务词）或 people.txt（同事名）。",
+                                     size: 12, weight: .regular, color: theme.text3)
+        let body = makeWrappingLabel(words.joined(separator: "、"), size: 12, weight: .regular, color: theme.text2)
+
+        let column = NSStackView()
+        column.orientation = .vertical
+        column.alignment = .leading
+        column.spacing = 2
+        column.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        column.addArrangedSubview(title)
+        column.addArrangedSubview(desc)
+        column.setCustomSpacing(10, after: desc)
+        column.addArrangedSubview(body)
+        mount(column, in: card)
+        NSLayoutConstraint.activate([
+            desc.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -40),
+            body.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -40),
+        ])
+        return card
     }
 
     @objc private func vocabFilterChanged(_ sender: VPSegmentedControl) {

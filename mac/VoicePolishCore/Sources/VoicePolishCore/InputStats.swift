@@ -96,11 +96,54 @@ public final class InputStats {
     }
 
     /// 本周一的 "yyyy-MM-dd"。固定周一起算，不随系统地区设置漂移（免费周额度按此重置）。
-    private func currentWeekStartString() -> String? {
-        var cal = Calendar.current
+    // 本地改动：改为 public，首页「按应用」卡片按同一周起点筛历史记录
+    public func currentWeekStartString() -> String? {
+        Self.weekStartString(for: Date(), calendar: .current)
+    }
+
+    // 本地改动：周起点抽成静态函数，「上周同期」与本周共用同一套周一起算规则
+    static func weekStartString(for date: Date, calendar: Calendar) -> String? {
+        var cal = calendar
         cal.firstWeekday = 2
-        guard let weekStart = cal.dateInterval(of: .weekOfYear, for: Date())?.start else { return nil }
-        return dateFormatter.string(from: weekStart)
+        guard let weekStart = cal.dateInterval(of: .weekOfYear, for: date)?.start else { return nil }
+        return dayKeyFormatter(cal).string(from: weekStart)
+    }
+
+    private static func dayKeyFormatter(_ cal: Calendar) -> DateFormatter {
+        let f = DateFormatter()
+        f.dateFormat = "yyyy-MM-dd"
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = cal
+        f.timeZone = cal.timeZone
+        return f
+    }
+
+    // 本地改动：上周同期 = 上周一 至 上周里与今天同一个星期几（含当天），用来和本周至今对比
+    public func lastWeekSamePeriodTotal(today: Date = Date()) -> (chars: Int, sessions: Int) {
+        Self.lastWeekSamePeriodTotal(records: loadRecords(), today: today, calendar: .current)
+    }
+
+    /// 纯函数版本，便于测试：records 为日记录，today 决定「本周第几天」。
+    public static func lastWeekSamePeriodTotal(records: [DailyRecord], today: Date,
+                                               calendar: Calendar) -> (chars: Int, sessions: Int) {
+        guard let thisStartStr = weekStartString(for: today, calendar: calendar) else { return (0, 0) }
+        let f = dayKeyFormatter(calendar)
+        guard let thisStart = f.date(from: thisStartStr),
+              let lastStart = calendar.date(byAdding: .day, value: -7, to: thisStart),
+              let lastSameDay = calendar.date(byAdding: .day, value: -7, to: calendar.startOfDay(for: today))
+        else { return (0, 0) }
+        let from = f.string(from: lastStart), to = f.string(from: lastSameDay)
+        let hit = records.filter { $0.date >= from && $0.date <= to }
+        return (hit.reduce(0) { $0 + $1.charCount }, hit.reduce(0) { $0 + $1.sessionCount })
+    }
+
+    // 本地改动：「上周同期」卡片的副标题：本周至今 vs 上周同期
+    public static func weekOverWeekText(current: Int, previous: Int) -> String {
+        guard previous > 0 else { return "上周同期没有使用" }
+        let pct = Int((Double(current - previous) / Double(previous) * 100).rounded())
+        if pct > 0 { return "本周 ↑\(pct)%" }
+        if pct < 0 { return "本周 ↓\(-pct)%" }
+        return "本周持平"
     }
 
     public func currentWeekTotal() -> (chars: Int, sessions: Int) {

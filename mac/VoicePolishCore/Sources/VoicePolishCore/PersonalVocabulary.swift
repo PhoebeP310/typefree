@@ -48,6 +48,13 @@ public enum PersonalVocabulary {
         return result
     }
 
+    // 本地改动：识别时实际带上的词里属于用户自己的那部分（hot_words + term_corrections 的 target，
+    // 去重、受上限截断后）。个人词排在内置词前面，所以等于 currentWords() 去掉内置词那段；
+    // 用户自己加的词恰好和内置词同名时仍算用户的，内置词开关不影响这个数。
+    static func personalWordCount(custom: [String], vocabularyTargets: [String], limit: Int = maxWords) -> Int {
+        mergeWords(builtin: [], custom: custom, vocabularyTargets: vocabularyTargets, limit: limit).count
+    }
+
     /// 生成给 ASR 的提示句（与实测验证生效的措辞保持一致），词表为空时返回 nil。
     static func contextSentence(for words: [String]) -> String? {
         guard !words.isEmpty else { return nil }
@@ -65,6 +72,13 @@ public enum PersonalVocabulary {
         return mergeWords(builtin: includeBuiltin ? builtinWords : [],
                           custom: custom,
                           vocabularyTargets: targets)
+    }
+
+    // 本地改动：侧栏「个人词库」角标用，按当前配置算用户自己的有效词数
+    public static func currentPersonalWordCount() -> Int {
+        let json = loadRawConfig()
+        return personalWordCount(custom: json["hot_words"] as? [String] ?? [],
+                                 vocabularyTargets: vocabularyTargets(from: json))
     }
 
     /// 给 ASR 的提示句，如 "用户常说的词：A、B、C"；词库为空时返回 nil。

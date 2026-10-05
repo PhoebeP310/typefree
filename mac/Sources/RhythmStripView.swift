@@ -3,8 +3,9 @@ import Cocoa
 import VoicePolishCore
 #endif
 
-/// 首页「节律」：近 6 周一行圆点，说得越多点越大越深（问 AI 同款蓝，给首页添点颜色）；没说的是一个小空圈；
-/// 周一处一道细线；今天一圈描边。鼠标停在哪天，右下角就写出那天的日期、字数、次数（系统 tooltip 在这里不可靠，自己画）。
+/// 首页「节律」：近 6 周一行圆点（问 AI 同款蓝，给首页添点颜色）；没说的是一个小空圈；
+/// 周一处一道细线；今天一圈描边。鼠标停在哪天，右下角就写出那天的日期、字数（系统 tooltip 在这里不可靠，自己画）。
+/// 本地改动：圆点改为同样大小、按深浅分 4 档（相对窗口内字数最多的那天，见 ActivityRhythm.intensityLevel）。
 final class RhythmStripView: NSView {
     /// 与问 AI 面板同一个蓝（刻意的，不跟随主题强调色）
     static let accent = NSColor(red: 0.25, green: 0.52, blue: 1.0, alpha: 1)
@@ -12,8 +13,9 @@ final class RhythmStripView: NSView {
     private var theme: VPTheme = .automatic
     private let rowHeight: CGFloat = 64
     private let labelHeight: CGFloat = 16
-    private let maxDot: CGFloat = 26
-    private let minDot: CGFloat = 8
+    // 本地改动：统一圆点大小（窄窗口时随格子收窄），深浅表示字数多少
+    private let dotSize: CGFloat = 16
+    private static let levelAlphas: [CGFloat] = [0, 0.25, 0.5, 0.75, 1.0]
     private var hoverIndex: Int?
     private var tracking: NSTrackingArea?
 
@@ -54,7 +56,8 @@ final class RhythmStripView: NSView {
     private func hoverText(_ d: ActivityRhythm.Day) -> String {
         let nf = NumberFormatter(); nf.numberStyle = .decimal
         let label = Self.dayLabel(d.date)
-        return d.chars > 0 ? "\(label) · \(nf.string(from: NSNumber(value: d.chars)) ?? "\(d.chars)") 字 · \(d.sessions) 次" : "\(label) · 没有使用"
+        // 本地改动：悬停只写日期和字数
+        return d.chars > 0 ? "\(label) · \(nf.string(from: NSNumber(value: d.chars)) ?? "\(d.chars)") 字" : "\(label) · 没有使用"
     }
 
     private static func dayLabel(_ key: String) -> String {
@@ -68,6 +71,7 @@ final class RhythmStripView: NSView {
         let slot = bounds.width / CGFloat(days.count)
         let maxChars = max(days.map(\.chars).max() ?? 0, 1)
         let cy = rowHeight / 2
+        let size = max(6, min(dotSize, slot - 4))
 
         for (i, d) in days.enumerated() {
             let cx = slot * (CGFloat(i) + 0.5)
@@ -86,15 +90,13 @@ final class RhythmStripView: NSView {
                 theme.cardAlt.setFill(); ring.fill()
                 theme.sep.setStroke(); ring.lineWidth = 1; ring.stroke()
             } else {
-                // 开平方：一天特别多字时，其他正常的日子不至于都缩成小点
-                let t = sqrt(CGFloat(d.chars) / CGFloat(maxChars))
-                let size = minDot + t * (maxDot - minDot)
+                let level = ActivityRhythm.intensityLevel(chars: d.chars, maxChars: maxChars)
                 let dot = NSBezierPath(ovalIn: NSRect(x: cx - size / 2, y: cy - size / 2, width: size, height: size))
-                Self.accent.withAlphaComponent(0.28 + 0.72 * t).setFill()
+                Self.accent.withAlphaComponent(Self.levelAlphas[level]).setFill()
                 dot.fill()
             }
             if d.isToday || i == hoverIndex {
-                let r = (d.chars == 0 ? 3 : (minDot + sqrt(CGFloat(d.chars) / CGFloat(maxChars)) * (maxDot - minDot)) / 2) + 3.5
+                let r = (d.chars == 0 ? 3 : size / 2) + 3.5
                 let ring = NSBezierPath(ovalIn: NSRect(x: cx - r, y: cy - r, width: r * 2, height: r * 2))
                 (d.isToday ? Self.accent : theme.text3).setStroke()
                 ring.lineWidth = 1.5
