@@ -14,6 +14,16 @@ public final class VoicePolishConfig {
         "bigasr_access_token", "zhipu_api_key", "deepseek_api_key",
     ]
 
+    /// 本地改动：macOS 默认改用本地文件存储（~/.config/voicepolish/secrets.json），
+    /// 避免自签名下每次重编都弹钥匙串授权；iOS 仍走钥匙串。
+    public static var defaultSecretStore: SecretStoring {
+        #if os(macOS)
+        return FileSecretStore.shared
+        #else
+        return KeychainSecretStore.shared
+        #endif
+    }
+
     /// 供其他模块读取 config 文件（如热词）
     public var configFileURL: URL { configPath }
     public var configDirectoryURL: URL { configDir }
@@ -36,7 +46,7 @@ public final class VoicePolishConfig {
     }
 
     /// 可注入的初始化方法，用于测试或自定义路径
-    public init(configDir: URL, secrets: SecretStoring = KeychainSecretStore.shared) {
+    public init(configDir: URL, secrets: SecretStoring = VoicePolishConfig.defaultSecretStore) {
         self.configDir = configDir
         self.configPath = configDir.appendingPathComponent("config.json")
         self.secrets = secrets
@@ -141,6 +151,16 @@ public final class VoicePolishConfig {
     /// Keychain 空 → 写入 + 读回核对 + 删明文；Keychain == 明文 → 删明文；
     /// Keychain ≠ 明文（冲突）→ 不覆盖 Keychain，并删除已失效的明文副本。
     public func reconcileSecrets() {
+        #if os(macOS)
+        // 本地改动：启动时在后台把钥匙串里已有的凭证一次性预迁移进 secrets.json，
+        // 不必等到首次用到某个 provider 才迁移（FileSecretStore 内部加锁，可跨线程）。
+        if let fileStore = secrets as? FileSecretStore {
+            let keys = Self.secretKeys
+            DispatchQueue.global(qos: .utility).async {
+                for key in keys { _ = fileStore.lookup(key) }
+            }
+        }
+        #endif
         migrateLegacyArkKeychainItem()
         let json = loadConfig()
         for key in Self.secretKeys {
@@ -164,6 +184,10 @@ public final class VoicePolishConfig {
     private func migrateLegacyArkKeychainItem() {
         if (loadConfig()["ark_api_key"] as? String)?.isEmpty == false { return }
         if let v = secrets.get("ark_api_key"), !v.isEmpty { return }
+        #if os(macOS)
+        // 本地改动：macOS 经 security CLI 只读旧条目，运行时不再调用 SecItem*（自签名下会弹钥匙串授权）。
+        guard case .found(let key) = LegacyKeychainCLI.read(service: "ark_api_key", account: nil) else { return }
+        #else
         let q: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: "ark_api_key",
@@ -173,6 +197,7 @@ public final class VoicePolishConfig {
         var result: AnyObject?
         guard SecItemCopyMatching(q as CFDictionary, &result) == errSecSuccess,
               let data = result as? Data, let key = String(data: data, encoding: .utf8), !key.isEmpty else { return }
+        #endif
         _ = secrets.set("ark_api_key", key)
     }
 

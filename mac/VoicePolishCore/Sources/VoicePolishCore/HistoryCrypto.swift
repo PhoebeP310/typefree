@@ -50,7 +50,8 @@ public enum HistoryCrypto {
         case .error(let reason):
             // 「读不到」≠「没有」：钥匙串被锁 / 用户拒绝授权 / access group 出错时若生成新密钥，
             // 旧记录会全部变成永久乱码。本次先不加密（新记录跳过、旧记录暂不显示），等能读到再说。
-            NSLog("[history] keychain lookup failed (\(reason)); history encryption unavailable this session")
+            // 本地改动：macOS 下存储已改为本地文件，日志措辞随之改为通用的 secret store。
+            NSLog("[history] secret store lookup failed (\(reason)); history encryption unavailable this session")
             return nil
         case .notFound:
             break
@@ -163,7 +164,8 @@ public enum HistoryCrypto {
         #if os(iOS)
         return KeychainSecretStore(accessGroup: "NHC4C4K7X7.com.voicepolish.shared")
         #else
-        return KeychainSecretStore.shared
+        // 本地改动：macOS 改用本地文件存储（首次缺失时经 security CLI 从钥匙串迁移），运行时不再碰钥匙串。
+        return FileSecretStore.shared
         #endif
     }
 }
