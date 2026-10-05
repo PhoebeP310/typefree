@@ -2146,10 +2146,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             stack.setCustomSpacing(24, after: statsGrid)
         }
 
-        // 近 6 周一行圆点 + 连续天数（Ray 2026-09-15 选的方案三；不带标题）
-        let rhythmCard = makeRhythmCard(stats: stats)
-        stack.addArrangedSubview(rhythmCard)
-        stack.setCustomSpacing(24, after: rhythmCard)
+        // 本地改动：原「节律」一行圆点卡片换成「洞察」：三张指标（累计字数 / 平均速度 / 总时长）+ 热力图
+        let records = stats.allDailyRecords()
+        let insightsTitle = sectionTitle("洞察")
+        stack.addArrangedSubview(insightsTitle)
+        stack.setCustomSpacing(8, after: insightsTitle)
+        let insightTiles = makeInsightTiles(records: records)
+        stack.addArrangedSubview(insightTiles)
+        stack.setCustomSpacing(10, after: insightTiles)
+        let heatmapCard = makeHeatmapCard(records: records)
+        stack.addArrangedSubview(heatmapCard)
+        stack.setCustomSpacing(24, after: heatmapCard)
 
         let healthTitle = sectionTitle("配置健康")
         stack.addArrangedSubview(healthTitle)
@@ -2280,39 +2287,129 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return card
     }
 
-    /// 「节律」卡片：一行墨点（RhythmStripView）+ 一排小标签（连续 / 最长 / 活跃天数 / 最常周几）
-    private func makeRhythmCard(stats: InputStats) -> NSView {
+    // 本地改动：「洞察」三张指标卡：累计口述字数 / 平均口述速度 / 总口述时间（不做「节省时间」）。
+    // 时长来自日统计里的 durationMs（录音时长），速度只按有时长的日子算，见 DictationInsights.totals。
+    private func makeInsightTiles(records: [DailyRecord]) -> NSView {
+        let t = DictationInsights.totals(records: records)
+        let speed: [DictationInsights.ValuePart] = [.init(t.speedPerMinute.map { "\($0)" } ?? "—", "每分钟字数")]
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .top
+        row.distribution = .fillEqually
+        row.spacing = 10
+        row.addArrangedSubview(makeInsightTile(parts: [.init(DictationInsights.compactCount(t.chars), "字")], caption: "口述字数"))
+        row.addArrangedSubview(makeInsightTile(parts: speed, caption: "平均口述速度"))
+        row.addArrangedSubview(makeInsightTile(parts: DictationInsights.durationParts(ms: t.durationMs), caption: "总口述时间"))
+        return row
+    }
+
+    private func makeInsightTile(parts: [DictationInsights.ValuePart], caption: String) -> NSView {
         let card = makeCard()
-        let rhythm = ActivityRhythm.compute(records: stats.allDailyRecords())
-
-        let strip = RhythmStripView()
-        strip.translatesAutoresizingMaskIntoConstraints = false
-        strip.apply(days: rhythm.days, theme: theme)
-
-        let chips = NSStackView()
-        chips.orientation = .horizontal
-        chips.alignment = .centerY
-        chips.spacing = 6
-        let okTag = makeTag("已连续 \(rhythm.currentStreak) 天", bg: RhythmStripView.accent.withAlphaComponent(0.12), fg: RhythmStripView.accent)
-        chips.addArrangedSubview(okTag)
-        chips.addArrangedSubview(makeSoftTag("最长连续 \(rhythm.bestStreak) 天"))
-        chips.addArrangedSubview(makeSoftTag("活跃 \(rhythm.activeDays) 天"))
-        if let w = rhythm.busiestWeekday {
-            chips.addArrangedSubview(makeSoftTag("最常在\(ActivityRhythm.weekdayNames[w])用"))
+        let valueRow = NSStackView()
+        valueRow.orientation = .horizontal
+        valueRow.alignment = .lastBaseline
+        valueRow.spacing = 3
+        for (i, part) in parts.enumerated() {
+            let big = label(part.value, size: 26, weight: .bold, color: theme.text)
+            big.font = monoFont(size: 26, weight: .bold)
+            big.maximumNumberOfLines = 1
+            big.lineBreakMode = .byClipping
+            let unit = label(part.unit, size: 12, weight: .regular, color: theme.text3)
+            unit.maximumNumberOfLines = 1
+            unit.lineBreakMode = .byClipping
+            valueRow.addArrangedSubview(big)
+            valueRow.addArrangedSubview(unit)
+            if i < parts.count - 1 { valueRow.setCustomSpacing(8, after: unit) }
         }
+        let cap = label(caption, size: 11, weight: .regular, color: theme.text3)
+
+        let stack = NSStackView()
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 6
+        stack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
+        stack.addArrangedSubview(valueRow)
+        stack.addArrangedSubview(cap)
+        mount(stack, in: card)
+        return card
+    }
+
+    // 本地改动：热力图卡片：顶部三个数（活跃天数 / 当前连续 / 最长连续，沿用 ActivityRhythm 的连续算法）
+    // + 右上角翻页箭头（每次翻一屏的周数），下面是 ActivityHeatmapView。
+    private weak var heatmapView: ActivityHeatmapView?
+
+    private func makeHeatmapCard(records: [DailyRecord]) -> NSView {
+        let card = makeCard()
+        let rhythm = ActivityRhythm.compute(records: records, days: 1)
+
+        func metric(_ value: Int, _ caption: String) -> NSView {
+            let v = NSStackView()
+            v.orientation = .vertical
+            v.alignment = .leading
+            v.spacing = 2
+            let big = label(formatNumber(value), size: 20, weight: .bold, color: theme.text)
+            big.font = monoFont(size: 20, weight: .bold)
+            big.maximumNumberOfLines = 1
+            v.addArrangedSubview(big)
+            v.addArrangedSubview(label(caption, size: 11, weight: .regular, color: theme.text3))
+            return v
+        }
+
+        func arrow(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
+            let b = NSButton()
+            b.bezelStyle = .inline
+            b.isBordered = false
+            b.image = NSImage(systemSymbolName: symbol, accessibilityDescription: tip)
+            b.contentTintColor = theme.text2
+            b.toolTip = tip
+            b.target = self
+            b.action = action
+            return b
+        }
+
+        let header = NSStackView()
+        header.orientation = .horizontal
+        header.alignment = .top
+        header.spacing = 32
+        header.addArrangedSubview(metric(rhythm.activeDays, "活跃天数"))
+        header.addArrangedSubview(metric(rhythm.currentStreak, "当前连续天数"))
+        header.addArrangedSubview(metric(rhythm.bestStreak, "最长连续天数"))
+        let spacer = NSView()
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        header.addArrangedSubview(spacer)
+        let prev = arrow("chevron.left", "更早", #selector(heatmapOlder))
+        let next = arrow("chevron.right", "更近", #selector(heatmapNewer))
+        header.addArrangedSubview(prev)
+        header.addArrangedSubview(next)
+        header.setCustomSpacing(4, after: prev)
+
+        let grid = ActivityHeatmapView()
+        grid.translatesAutoresizingMaskIntoConstraints = false
+        grid.onPagingChanged = { [weak prev, weak next] canOlder, canNewer in
+            prev?.isEnabled = canOlder
+            next?.isEnabled = canNewer
+        }
+        grid.apply(records: records, theme: theme)
+        prev.isEnabled = false
+        next.isEnabled = false
+        heatmapView = grid
 
         let column = NSStackView()
         column.orientation = .vertical
         column.alignment = .leading
-        column.spacing = 12
+        column.spacing = 16
         column.translatesAutoresizingMaskIntoConstraints = false
-        column.edgeInsets = NSEdgeInsets(top: 16, left: 24, bottom: 16, right: 24)
-        column.addArrangedSubview(strip)
-        column.addArrangedSubview(chips)
+        column.edgeInsets = NSEdgeInsets(top: 16, left: 24, bottom: 14, right: 24)
+        column.addArrangedSubview(header)
+        column.addArrangedSubview(grid)
         mount(column, in: card)
-        strip.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -48).isActive = true
+        header.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -48).isActive = true
+        grid.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -48).isActive = true
         return card
     }
+
+    @objc private func heatmapOlder() { heatmapView?.page(by: 1) }
+    @objc private func heatmapNewer() { heatmapView?.page(by: -1) }
 
     private func makeHomeHero() -> NSView {
         let card = makeCard()

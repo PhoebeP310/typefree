@@ -8,12 +8,16 @@ public struct DailyRecord: Codable, Equatable {
     /// 试用期走代理（用官方 Key）的交付只进 charCount，不进这里——否则试用刚结束
     /// 切自带 Key 时，试用期说的字会把整周免费额度直接吃光。
     public var quotaCharCount: Int
+    // 本地改动：当天累计录音时长（毫秒），首页「洞察」算总口述时间 / 平均口述速度用。
+    // 记在日统计里而不是从历史现算，历史保留期改短也不影响累计。0 = 当天没有时长数据（老记录）。
+    public var durationMs: Int
 
-    public init(date: String, charCount: Int = 0, sessionCount: Int = 0, quotaCharCount: Int = 0) {
+    public init(date: String, charCount: Int = 0, sessionCount: Int = 0, quotaCharCount: Int = 0, durationMs: Int = 0) {
         self.date = date
         self.charCount = charCount
         self.sessionCount = sessionCount
         self.quotaCharCount = quotaCharCount
+        self.durationMs = durationMs
     }
 
     /// 旧版统计文件没有 quotaCharCount 字段 → 按 0 处理（老记录不占额度，升级后本周从零起算）。
@@ -23,6 +27,8 @@ public struct DailyRecord: Codable, Equatable {
         charCount = try c.decode(Int.self, forKey: .charCount)
         sessionCount = try c.decode(Int.self, forKey: .sessionCount)
         quotaCharCount = try c.decodeIfPresent(Int.self, forKey: .quotaCharCount) ?? 0
+        // 本地改动：旧文件没有 durationMs → 0（启动时由历史记录一次性回填）
+        durationMs = try c.decodeIfPresent(Int.self, forKey: .durationMs) ?? 0
     }
 }
 
@@ -70,21 +76,41 @@ public final class InputStats {
 
     /// - Parameter countsTowardFreeQuota: 本次交付是否计入免费周额度
     ///   （仅未买断 + 自带 Key 的交付传 true；试用期走代理的交付传 false）。
-    public func record(charCount: Int, countsTowardFreeQuota: Bool = false) {
+    /// - Parameter durationMs: 本次录音时长（毫秒），本地改动：累加进当天的 durationMs
+    public func record(charCount: Int, durationMs: Int = 0, countsTowardFreeQuota: Bool = false) {
         guard charCount > 0 else { return }
         var records = loadRecords()
         let todayStr = dateFormatter.string(from: Date())
+        let dur = max(0, durationMs)
 
         if let index = records.firstIndex(where: { $0.date == todayStr }) {
             records[index].charCount += charCount
             records[index].sessionCount += 1
+            records[index].durationMs += dur
             if countsTowardFreeQuota { records[index].quotaCharCount += charCount }
         } else {
             records.append(DailyRecord(date: todayStr, charCount: charCount, sessionCount: 1,
-                                       quotaCharCount: countsTowardFreeQuota ? charCount : 0))
+                                       quotaCharCount: countsTowardFreeQuota ? charCount : 0, durationMs: dur))
         }
 
         saveRecords(records)
+    }
+
+    // 本地改动：老记录没有录音时长，启动时按历史记录回填一次（只填 durationMs 为 0 的日子）
+    public func backfillDurations(_ durationsByDay: [String: Int]) {
+        let records = loadRecords()
+        let filled = Self.backfilled(records: records, durationsByDay: durationsByDay)
+        if filled != records { saveRecords(filled) }
+    }
+
+    /// 纯函数版本：durationMs 为 0 的日子用 durationsByDay 里的值补上，已有时长的日子不动。
+    public static func backfilled(records: [DailyRecord], durationsByDay: [String: Int]) -> [DailyRecord] {
+        records.map { r in
+            guard r.durationMs == 0, let d = durationsByDay[r.date], d > 0 else { return r }
+            var copy = r
+            copy.durationMs = d
+            return copy
+        }
     }
 
     // MARK: - 查询

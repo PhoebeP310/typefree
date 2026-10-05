@@ -39,7 +39,7 @@ public struct ActivityRhythm: Equatable {
         f.timeZone = calendar.timeZone
         let byDate = Dictionary(records.map { ($0.date, $0) }, uniquingKeysWith: { a, b in
             DailyRecord(date: a.date, charCount: a.charCount + b.charCount, sessionCount: a.sessionCount + b.sessionCount,
-                        quotaCharCount: a.quotaCharCount + b.quotaCharCount)
+                        quotaCharCount: a.quotaCharCount + b.quotaCharCount, durationMs: a.durationMs + b.durationMs)
         })
         let todayStart = calendar.startOfDay(for: today)
 

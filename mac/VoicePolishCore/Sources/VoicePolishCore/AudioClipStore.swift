@@ -136,6 +136,17 @@ public final class AudioClipStore {
         return Array(UnsafeBufferPointer(start: channel, count: Int(buffer.frameLength)))
     }
 
+    // 本地改动：存档音频的时长（毫秒），只读文件头里的帧数，不解码。首页「洞察」回填录音时长用。
+    public func durationMs(fileName name: String) -> Int? {
+        guard let data = loadData(fileName: name) else { return nil }
+        let tmpURL = fileManager.temporaryDirectory
+            .appendingPathComponent("voicepolish-duration-\(UUID().uuidString).m4a")
+        guard (try? data.write(to: tmpURL, options: .atomic)) != nil else { return nil }
+        defer { try? fileManager.removeItem(at: tmpURL) }
+        guard let file = try? AVAudioFile(forReading: tmpURL), file.fileFormat.sampleRate > 0 else { return nil }
+        return Int(Double(file.length) / file.fileFormat.sampleRate * 1000)
+    }
+
     public func loadData(fileName name: String) -> Data? {
         let fileURL = url(forFileName: name)
         guard fileManager.fileExists(atPath: fileURL.path),

@@ -940,6 +940,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
 
     private var isRecording = false
     private var isProcessing = false
+    // 本地改动：本次送去识别的录音时长（毫秒，16kHz 样本数换算），交付时记进日统计，首页「洞察」用
+    private var pendingRecordingDurationMs = 0
     private let debugLogQueue = DispatchQueue(label: "com.voicepolish.debug-log", qos: .utility)
     private let debugLogMaxBytes: UInt64 = 2 * 1024 * 1024
     private let debugLogPrivacyMigrationKey = "debugLogPrivacyMigrationV1"
@@ -1327,6 +1329,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                 }
                 return
             }
+            // 本地改动：记下录音时长；先投到主线程，保证早于识别完成后的 .done 回调
+            let recordingMs = samples.count * 1000 / 16000
+            DispatchQueue.main.async { self.pendingRecordingDurationMs = recordingMs }
 
             guard let session = session else {
                 self.pipeline.process(samples: samples, mode: mode)  // omni / 未启用流式：原路径
@@ -1535,6 +1540,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         debugLog("UNDO cancel: re-processing \(samples.count) samples")
         isProcessing = true
         statusBar.setTitle("VP⏳")
+        pendingRecordingDurationMs = samples.count * 1000 / 16000   // 本地改动：撤销重识别也记录音时长
         pipeline.process(samples: samples, mode: processingMode)
     }
 
@@ -1546,6 +1552,41 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             }
             AudioClipStore.defaultStore().migrateAll()
             self.cleanupOrphanAudio()
+            self.backfillInputStatsDurationsIfNeeded()
+        }
+    }
+
+    // 本地改动：老的日统计没有录音时长。升级后第一次启动从历史记录（存档音频的时长）按天回填一次，
+    // 只填 durationMs 为 0、且历史覆盖了当天全部输入的日子（见 DictationInsights.durationsByDay）。
+    // 历史里的 duration_ms 是松手到出字的处理耗时，不是录音时长，所以这里读音频文件本身的长度。
+    private static let durationBackfillKey = "inputStatsDurationBackfilled_v1"
+
+    private func backfillInputStatsDurationsIfNeeded() {
+        guard !UserDefaults.standard.bool(forKey: Self.durationBackfillKey) else { return }
+        guard let logFile = AIPolisher.historyLogFileURL() else { return }
+        let content = (try? String(contentsOf: logFile, encoding: .utf8)) ?? ""
+        let enc = HistoryCrypto.defaultEncryptor()
+        let store = AudioClipStore.defaultStore()
+        var entries: [(time: String, durationMs: Int)] = []
+        var undecodable = 0
+        for line in content.split(separator: "\n") where !line.isEmpty {
+            guard let log = HistoryCrypto.decodeLine(String(line), enc: enc) else { undecodable += 1; continue }
+            // 跳过问 AI（已移除的功能）和识别失败/空结果（这些没有计入日统计）
+            guard !log.isAsk, !log.asr.isEmpty, let audio = log.audioFile,
+                  let ms = store.durationMs(fileName: audio), ms > 0 else { continue }
+            entries.append((log.time, ms))
+        }
+        // 历史密钥暂时读不出来就下次再试，别把没回填的状态标成已完成
+        guard undecodable == 0 else {
+            debugLog("Duration backfill skipped: \(undecodable) undecodable history lines")
+            return
+        }
+        DispatchQueue.main.async {
+            let durations = DictationInsights.durationsByDay(entries: entries,
+                                                             records: InputStats.shared.allDailyRecords())
+            InputStats.shared.backfillDurations(durations)
+            UserDefaults.standard.set(true, forKey: Self.durationBackfillKey)
+            self.debugLog("Duration backfill: \(entries.count) clips, filled \(durations.count) days")
         }
     }
 
@@ -2169,7 +2210,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                     && !self.cloudTranscriber.isConfigured()
                     && TrialManager.shared.isInTrial
                 let countsTowardQuota = !LicenseManager.shared.isActivated && !usedTrialProxy
+                // 本地改动：带上本次录音时长（取完清零，避免下一次没有录音的交付重复计入）
+                let recordingMs = self.pendingRecordingDurationMs
+                self.pendingRecordingDurationMs = 0
                 InputStats.shared.record(charCount: deliveredText.count,
+                                         durationMs: recordingMs,
                                          countsTowardFreeQuota: countsTowardQuota)
                 AutoLearnScheduler.shared.noteRecordDelivered()
 

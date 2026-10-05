@@ -25,7 +25,7 @@
 		AA22BB33CC44DD55EE660003 /* statusbar-icon.png in Resources */ = {isa = PBXBuildFile; fileRef = AA22BB33CC44DD55EE660001 /* statusbar-icon.png */; };
 		AF2026091500000000000001 /* WhatsNewGuideView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF2026091500000000000002 /* WhatsNewGuideView.swift */; };
 		AF2026091600000000000001 /* SupportChatView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF2026091600000000000002 /* SupportChatView.swift */; };
-		AF2026091700000000000001 /* RhythmStripView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF2026091700000000000002 /* RhythmStripView.swift */; };
+		AF2026091700000000000001 /* ActivityHeatmapView.swift in Sources */ = {isa = PBXBuildFile; fileRef = AF2026091700000000000002 /* ActivityHeatmapView.swift */; };
 		AF2026091500000000000003 /* WhatsNewGuide.html in Resources */ = {isa = PBXBuildFile; fileRef = AF2026091500000000000004 /* WhatsNewGuide.html */; };
 		AA22BB33CC44DD55EE660004 /* statusbar-icon@2x.png in Resources */ = {isa = PBXBuildFile; fileRef = AA22BB33CC44DD55EE660002 /* statusbar-icon@2x.png */; };
 		B4D3C2A1E5F60718293A4B5C /* VoicePolishCore in Frameworks */ = {isa = PBXBuildFile; productRef = B4D3C2A1E5F60718293A4B5E /* VoicePolishCore */; };
@@ -49,7 +49,7 @@
 		AA22BB33CC44DD55EE660001 /* statusbar-icon.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "statusbar-icon.png"; sourceTree = "<group>"; };
 		AF2026091500000000000002 /* WhatsNewGuideView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WhatsNewGuideView.swift; sourceTree = "<group>"; };
 		AF2026091600000000000002 /* SupportChatView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SupportChatView.swift; sourceTree = "<group>"; };
-		AF2026091700000000000002 /* RhythmStripView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RhythmStripView.swift; sourceTree = "<group>"; };
+		AF2026091700000000000002 /* ActivityHeatmapView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ActivityHeatmapView.swift; sourceTree = "<group>"; };
 		AF2026091500000000000004 /* WhatsNewGuide.html */ = {isa = PBXFileReference; lastKnownFileType = text.html; path = WhatsNewGuide.html; sourceTree = "<group>"; };
 		AA22BB33CC44DD55EE660002 /* statusbar-icon@2x.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = "statusbar-icon@2x.png"; sourceTree = "<group>"; };
 		AE7E5072C704593A814A88FB /* AudioRecorder.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = AudioRecorder.swift; sourceTree = "<group>"; };
@@ -137,7 +137,7 @@
 				AF2026091000000000000002 /* AppAppearance.swift */,
 				AF2026091500000000000002 /* WhatsNewGuideView.swift */,
 				AF2026091600000000000002 /* SupportChatView.swift */,
-				AF2026091700000000000002 /* RhythmStripView.swift */,
+				AF2026091700000000000002 /* ActivityHeatmapView.swift */,
 				502CD7DBBAD698B6BCA49515 /* TextDelivery.swift */,
 				D4E5F60718293041526C7D8E /* HotWordsAutoLearner.swift */,
 				B0207B3F20260703526C7D02 /* AutoLearnScheduler.swift */,
@@ -242,7 +242,7 @@
 				AF2026091000000000000001 /* AppAppearance.swift in Sources */,
 				AF2026091500000000000001 /* WhatsNewGuideView.swift in Sources */,
 				AF2026091600000000000001 /* SupportChatView.swift in Sources */,
-				AF2026091700000000000001 /* RhythmStripView.swift in Sources */,
+				AF2026091700000000000001 /* ActivityHeatmapView.swift in Sources */,
 				35BD140E249225353E2DD47E /* TextDelivery.swift in Sources */,
 				C3D4E5F607182930415B6C7D /* HotWordsAutoLearner.swift in Sources */,
 				A0107A2E20260703415B6C01 /* AutoLearnScheduler.swift in Sources */,
