@@ -17,6 +17,7 @@ public enum CueSound {
         case fifth     // 五度：更开阔
         case third     // 大三度：更暖、更低
         case single    // 单音：最克制
+        case knock     // 本地改动：指节敲木桌，闷闷的「咚」，不是乐音
 
         public var displayName: String {
             switch self {
@@ -24,6 +25,7 @@ public enum CueSound {
             case .fifth: return "五度双音"
             case .third: return "三度双音"
             case .single: return "单音"
+            case .knock: return "指节敲木桌"
             }
         }
     }
@@ -50,25 +52,37 @@ public enum CueSound {
 
     public static func stereoSamples(style: Style, kind: Kind) -> ([Float], [Float]) {
         let up = kind == .start
-        // 音高（Hz）。双音：开始 = 低→高，结束 = 高→低
-        let notes: [Double]
-        switch style {
-        case .fourth: notes = up ? [440.0, 587.33] : [440.0, 329.63]     // A4→D5 / A4→E4
-        case .fifth:  notes = up ? [349.23, 523.25] : [523.25, 349.23]   // F4→C5 / C5→F4
-        case .third:  notes = up ? [311.13, 392.0] : [392.0, 311.13]     // E♭4→G4 / G4→E♭4
-        case .single: notes = up ? [587.33] : [440.0]                    // D5 / A4
-        }
         let n = Int(totalDuration * sampleRate)
         var dry = [Float](repeating: 0, count: n)
         let lead = 0.004
-        for (i, f) in notes.enumerated() {
-            let isLast = i == notes.count - 1
-            addNote(&dry, freq: f, at: lead + Double(i) * noteGap,
-                    amp: isLast ? 1.0 : 0.85, decay: isLast ? 0.065 : 0.05)
+        var wet: Float = 0.32
+        if style == .knock {
+            // 本地改动：开始敲一下；结束敲两下，第二下低一点、轻一点
+            if up {
+                addKnock(&dry, pitch: 1.0, at: lead, amp: 1.0)
+            } else {
+                addKnock(&dry, pitch: 1.08, at: lead, amp: 1.0)
+                addKnock(&dry, pitch: 0.9, at: lead + 0.09, amp: 0.75)
+            }
+            wet = 0.12   // 只留一点房间感，敲击声要干
+        } else {
+            // 音高（Hz）。双音：开始 = 低→高，结束 = 高→低
+            let notes: [Double]
+            switch style {
+            case .fourth: notes = up ? [440.0, 587.33] : [440.0, 329.63]     // A4→D5 / A4→E4
+            case .fifth:  notes = up ? [349.23, 523.25] : [523.25, 349.23]   // F4→C5 / C5→F4
+            case .third:  notes = up ? [311.13, 392.0] : [392.0, 311.13]     // E♭4→G4 / G4→E♭4
+            case .single: notes = up ? [587.33] : [440.0]                    // D5 / A4
+            case .knock:  notes = []
+            }
+            for (i, f) in notes.enumerated() {
+                let isLast = i == notes.count - 1
+                addNote(&dry, freq: f, at: lead + Double(i) * noteGap,
+                        amp: isLast ? 1.0 : 0.85, decay: isLast ? 0.065 : 0.05)
+            }
         }
         var (wl, wr) = reverb(dry)
         var l = [Float](repeating: 0, count: n), r = l
-        let wet: Float = 0.32
         for i in 0..<n {
             l[i] = dry[i] + wet * wl[i]
             r[i] = dry[i] + wet * wr[i]
@@ -100,6 +114,35 @@ public enum CueSound {
             if env < 1e-5 && t > attack { break }
             let ph = 2 * .pi * freq * t
             buf[i] += Float(amp * env * (sin(ph) + 0.03 * sin(2 * ph)))
+        }
+    }
+
+    /// 本地改动：指节敲木桌。三个快速衰减的低频分量（指节的「咚」+ 桌板共鸣），
+    /// 开头 4ms 一点点撞击噪声，整体过一阶低通去掉高频，听着发闷。1ms 起音避免爆音。
+    static func addKnock(_ buf: inout [Float], pitch: Double, at start: Double, amp: Double) {
+        let s0 = Int(start * sampleRate)
+        let modes: [(Double, Double, Double)] = [(150, 1.0, 0.030), (410, 0.45, 0.018), (980, 0.12, 0.008)]
+        let len = min(buf.count - s0, Int(0.14 * sampleRate))
+        guard len > 0 else { return }
+        var seed: UInt64 = 0x9E3779B97F4A7C15 &* UInt64(pitch * 1000)
+        var hit = [Double](repeating: 0, count: len)
+        for i in 0..<len {
+            let t = Double(i) / sampleRate
+            var v = 0.0
+            for (f, a, tau) in modes { v += a * exp(-t / tau) * sin(2 * .pi * f * pitch * t) }
+            if t < 0.004 {
+                seed = seed &* 6364136223846793005 &+ 1442695040888963407
+                let noise = Double(seed >> 33) / Double(1 << 31) * 2 - 1
+                v += 0.25 * noise * exp(-t / 0.0013)
+            }
+            hit[i] = v
+        }
+        let a = exp(-2 * .pi * 1100 / sampleRate)
+        var y = 0.0
+        for i in 0..<len {
+            y = (1 - a) * hit[i] + a * y
+            let attack = min(1, Double(i) / (0.001 * sampleRate))
+            buf[s0 + i] += Float(amp * attack * y)
         }
     }
 
