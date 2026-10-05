@@ -308,7 +308,44 @@ public class AIPolisher {
            let styleSection = StyleProfileStore.promptSection(forAppName: polishLogAppNameProvider?()) {
             prompt += "\n\n" + styleSection
         }
+        // 本地改动：用户在 config.json 的 polish_user_rules 里写的规则（全局 + 按前台 App），放最后
+        prompt += Self.userRulesPromptSection(rawRules: configuredUserRules(), appName: polishLogAppNameProvider?())
         return prompt
+    }
+
+    // 本地改动：读 config.json 的 polish_user_rules（每次请求现读，改完不用重启）
+    private func configuredUserRules() -> Any? {
+        guard let data = try? Data(contentsOf: VoicePolishConfig.shared.configFileURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        return json["polish_user_rules"]
+    }
+
+    /// 本地改动：把 polish_user_rules 拼成 prompt 末尾的一段。
+    /// 形状：{"global": [String], "apps": {"<App 名子串>": [String]}}；App 名不区分大小写做子串匹配。
+    /// 没有适用规则时返回空串，prompt 保持原样。
+    /// 注意：规则要短、只管格式，「保留/不要改」类条款写多了会让模型整体变怂。
+    static func userRulesPromptSection(rawRules: Any?, appName: String?) -> String {
+        guard let dict = rawRules as? [String: Any] else { return "" }
+        func clean(_ value: Any?) -> [String] {
+            ((value as? [Any]) ?? []).compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        }
+        var rules = clean(dict["global"])
+        let app = appName?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+        if !app.isEmpty, let apps = dict["apps"] as? [String: Any] {
+            // 按 key 排序，保证同一 App 多次请求 prompt 一致
+            for key in apps.keys.sorted() {
+                let needle = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                guard !needle.isEmpty, app.contains(needle) else { continue }
+                rules.append(contentsOf: clean(apps[key]))
+            }
+        }
+        var seen = Set<String>()
+        rules = rules.filter { seen.insert($0).inserted }
+        guard !rules.isEmpty else { return "" }
+        return "\n\n## 用户的写作规则（优先遵守）\n" + rules.map { "- " + $0 }.joined(separator: "\n")
     }
 
     // MARK: - 云端 ASR 后润色
