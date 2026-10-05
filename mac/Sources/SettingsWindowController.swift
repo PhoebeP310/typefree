@@ -563,6 +563,10 @@ private final class VocabChipView: NSView {
     var normalBg: NSColor = .clear
     var hoverBg: NSColor = .clear
     private var tracking: NSTrackingArea?
+    private var hovering = false
+    // 本地改动：触控板双指滚动时卡片从鼠标下移走，系统不发 mouseExited，划过的卡片会一直停在高亮。
+    // 两道保险：同一时间只留一张高亮；滚动触发 updateTrackingAreas 时按鼠标实际位置重判。
+    private static weak var hovered: VocabChipView?
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
@@ -572,16 +576,27 @@ private final class VocabChipView: NSView {
                                owner: self, userInfo: nil)
         addTrackingArea(t)
         tracking = t
+        if hovering, let window {
+            let p = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+            if !bounds.contains(p) { setHovering(false) }
+        }
     }
 
     override func mouseEntered(with event: NSEvent) {
-        layer?.setAppearanceBackground(hoverBg)
-        onHoverChange?(true)
+        setHovering(true)
     }
 
     override func mouseExited(with event: NSEvent) {
-        layer?.setAppearanceBackground(normalBg)
-        onHoverChange?(false)
+        setHovering(false)
+    }
+
+    private func setHovering(_ on: Bool) {
+        if on, let prev = Self.hovered, prev !== self { prev.setHovering(false) }
+        if on { Self.hovered = self } else if Self.hovered === self { Self.hovered = nil }
+        guard hovering != on else { return }
+        hovering = on
+        layer?.setAppearanceBackground(on ? hoverBg : normalBg)
+        onHoverChange?(on)
     }
 }
 
