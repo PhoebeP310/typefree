@@ -903,8 +903,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
 
     /// 菜单栏「检查更新…」转发到 Sparkle。
     @objc func checkForUpdates(_ sender: Any?) {
-        updateUserDriver.beginUserInitiatedCheck()
-        updater.checkForUpdates()
+        // 本地改动：只打开上游 Releases 页看有没有新版，不下载安装
+        NSWorkspace.shared.open(URL(string: "https://github.com/kdsz001/typefree/releases")!)
     }
 
     func pendingUpdateInfo() -> TypefreeUpdateInfo? {
@@ -1060,18 +1060,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         // （之前只能靠右键菜单粘贴）。
         setupMainMenu()
 
-        do {
-            try updater.start()
-            if updater.automaticallyChecksForUpdates,
-               updater.allowsAutomaticUpdates,
-               !updater.automaticallyDownloadsUpdates {
-                updater.automaticallyDownloadsUpdates = true
-            }
-            // Info.plist 中仍保持每天检查一次；这里不额外强制每次启动弹检查。
-            debugLog("Sparkle updater started")
-        } catch {
-            debugLog("Sparkle updater failed: \(error.localizedDescription)")
-        }
+        // 本地改动：自编译魔改版不启动 Sparkle，避免被官方版自动覆盖；跟进上游走 git merge upstream/main
+        debugLog("Sparkle updater disabled (local build)")
 
         // 启动时只在「从未问过」时申请；已拒绝的不自动跳系统设置——
         // 配合开机自启，每次登录都被弹到「系统设置」体验极差，且用户无法关掉。
