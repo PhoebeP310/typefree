@@ -4262,8 +4262,42 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
 
-        mount(row, in: card)
+        // 本地改动：声音样式可选（原来只能改 config 的 cue_sound_style），点哪个就切到哪个并试听一下
+        let styles = CueSound.Style.allCases
+        let seg = VPSegmentedControl(
+            labels: styles.map(\.displayName),
+            trackBg: theme.cardAlt,
+            trackBorder: theme.sep,
+            selBg: theme.segSelBg,
+            selBorder: theme.sep,
+            selText: theme.text,
+            normalText: theme.text2,
+            target: self,
+            action: #selector(cueSoundStyleChanged(_:)))
+        seg.selectedSegment = styles.firstIndex(of: CuePlayer.shared.style) ?? 0
+        seg.setAccessibilityLabel("提示音样式")
+
+        let col = NSStackView()
+        col.orientation = .vertical
+        col.alignment = .leading
+        col.spacing = 0
+        col.addArrangedSubview(row)
+        col.addArrangedSubview(seg)
+        row.widthAnchor.constraint(equalTo: col.widthAnchor).isActive = true
+        seg.leadingAnchor.constraint(equalTo: col.leadingAnchor, constant: 20).isActive = true
+        seg.trailingAnchor.constraint(equalTo: col.trailingAnchor, constant: -20).isActive = true
+        col.setCustomSpacing(0, after: row)
+        col.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 16, right: 0)
+
+        mount(col, in: card)
         return card
+    }
+
+    @objc private func cueSoundStyleChanged(_ sender: VPSegmentedControl) {
+        let styles = CueSound.Style.allCases
+        guard styles.indices.contains(sender.selectedSegment) else { return }
+        config.save(value: styles[sender.selectedSegment].rawValue, forKey: CuePlayer.styleKey)
+        CuePlayer.shared.play(.start, force: true)   // 选了就响一下，不用去录音才听得到
     }
 
     @objc private func cueSoundChanged(_ sender: VPToggle) {
