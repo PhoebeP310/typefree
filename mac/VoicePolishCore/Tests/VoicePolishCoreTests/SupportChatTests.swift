@@ -111,8 +111,14 @@ final class SupportChatTests: XCTestCase {
         service.append([SupportMessage(id: 12, role: .user, text: "q2", createdAt: "", ticketId: 2)])
         XCTAssertEqual(service.messages(inTicket: 2).first?.localImageFile, "img-12.jpg")
         // 重开服务：工单和消息都从本机缓存读回（落盘在后台队列，等文件写好）
-        let deadline = Date().addingTimeInterval(2)
-        while Date() < deadline, SupportChatService(defaults: suite, storeDir: dir, apiBase: "x").tickets.count < 3 { usleep(20_000) }
+        // ⚠ 必须同时等「工单」和「消息」两个文件：它们共用一个串行队列，工单先入队先落盘，
+        // 只等工单的话在慢机器上消息还没写完就断言，CI 上就会偶发 messages.count == 0（2026-09-21 踩过）。
+        let deadline = Date().addingTimeInterval(10)
+        while Date() < deadline {
+            let probe = SupportChatService(defaults: suite, storeDir: dir, apiBase: "x")
+            if probe.tickets.count >= 3, probe.messages.count >= 5 { break }
+            usleep(20_000)
+        }
         let again = SupportChatService(defaults: suite, storeDir: dir, apiBase: "http://127.0.0.1:1")
         XCTAssertEqual(Set(again.tickets.map(\.id)), [1, 2, 3])
         XCTAssertEqual(again.messages.count, 5)

@@ -85,3 +85,31 @@ final class PersonalVocabularyTests: XCTestCase {
         XCTAssertNil(PersonalVocabulary.contextSentence(for: []))
     }
 }
+
+/// 2026-09-23：火山词库传法按官方文档改为「热词直传」（可叠加 dialog_ctx 提示句）
+final class VolcanoVocabContextTests: XCTestCase {
+    func testHotwordsFormatMatchesOfficialDoc() throws {
+        let obj = try XCTUnwrap(PersonalVocabulary.volcanoContextObject(words: ["张鹤", "Claude Code"], mode: .hotwords))
+        let hot = try XCTUnwrap(obj["hotwords"] as? [[String: String]])
+        XCTAssertEqual(hot, [["word": "张鹤"], ["word": "Claude Code"]])
+        XCTAssertNil(obj["context_type"], "只传热词时不应带 dialog_ctx")
+    }
+
+    func testBothPutsHotwordsAndDialogContextInOneObject() throws {
+        let obj = try XCTUnwrap(PersonalVocabulary.volcanoContextObject(words: ["千问"], mode: .both))
+        XCTAssertEqual((obj["hotwords"] as? [[String: String]])?.first?["word"], "千问")
+        XCTAssertEqual(obj["context_type"] as? String, "dialog_ctx")
+        let data = try XCTUnwrap(obj["context_data"] as? [[String: String]])
+        XCTAssertEqual(data.first?["text"], "用户常说的词：千问")
+    }
+
+    func testLegacyContextModeUnchanged() throws {
+        let obj = try XCTUnwrap(PersonalVocabulary.volcanoContextObject(words: ["热词"], mode: .context))
+        XCTAssertNil(obj["hotwords"])
+        XCTAssertEqual((obj["context_data"] as? [[String: String]])?.first?["text"], "用户常说的词：热词")
+    }
+
+    func testEmptyVocabularySendsNothing() {
+        XCTAssertNil(PersonalVocabulary.volcanoContextObject(words: [], mode: .both))
+    }
+}

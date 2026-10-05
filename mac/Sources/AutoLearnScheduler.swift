@@ -69,6 +69,18 @@ final class AutoLearnScheduler {
             saveState(state)
         }
 
+        // 从成稿挖词默认停用（2026-09-11）：成稿是识别+润色自己的输出，已认对的词加进词表没增益，
+        // 认错的写法（Claude 听成 Cloud）反而被当成常用词越学越牢，还挖进 in/Pro/Max 这类通用词占名额。
+        let miningEnabled = config.bool(forKey: "vocab_mining_enabled", defaultValue: false)
+        // 风格画像只在「交给润色用」时才统计（2026-09-23）：注入从 7-03 起一直在观察期、默认关，
+        // 之前照样每 6 小时解密历史算一遍、存着不用，白算。要用时打开 style_profile_injection_enabled 即可。
+        let styleEnabled = config.bool(forKey: "style_profile_injection_enabled", defaultValue: false)
+        if !styleEnabled { StyleProfileStore.clear() }
+        guard miningEnabled || styleEnabled else {
+            debugLog?("AutoLearn: 挖词与风格画像都未启用，跳过（改过的词进词库不走这里）")
+            return
+        }
+
         let logs = PolishHistoryStore().load(limit: historyWindow)   // 新→旧
         guard !logs.isEmpty else {
             StyleProfileStore.clear()
@@ -76,12 +88,12 @@ final class AutoLearnScheduler {
             return
         }
 
-        // 从成稿挖词默认停用（2026-09-11）：成稿是识别+润色自己的输出，已认对的词加进词表没增益，
-        // 认错的写法（Claude 听成 Cloud）反而被当成常用词越学越牢，还挖进 in/Pro/Max 这类通用词占名额。
-        if config.bool(forKey: "vocab_mining_enabled", defaultValue: false) {
+        if miningEnabled {
             mineVocabulary(from: logs, state: &state)
         }
-        updateStyleProfile(from: logs)
+        if styleEnabled {
+            updateStyleProfile(from: logs)
+        }
     }
 
     // MARK: - 词汇挖掘

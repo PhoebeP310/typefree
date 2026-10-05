@@ -209,8 +209,18 @@ final class MicrophoneManager {
         var size: UInt32 = 0
         guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &size) == noErr, size > 0 else { return false }
 
-        let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)
-        defer { bufferList.deallocate() }
+        // ⚠ 必须按系统给的 size 分配，别再写成 `UnsafeMutablePointer<AudioBufferList>.allocate(capacity: 1)`。
+        // AudioBufferList 是变长结构：4 字节 mNumberBuffers + 尾部 mNumberBuffers 个 AudioBuffer。
+        // arm64 上一个结构体只有 24 字节（= 1 个 buffer），而有 2 个输入流的设备系统要写 40 字节
+        // → 每次枚举麦克风就越界写 16 字节，堆被写坏后进程会在随后任何地方崩（分配器报错、
+        // 释放野对象、跳空地址都见过）。工单 #1005 的用户用 3.5mm 耳机麦、一天崩好几次就是这个；
+        // owner 机器上所有设备恰好都 ≤24 字节，所以本地永远复现不出来。见 crash 报告分析 2026-09-21。
+        let byteCount = max(Int(size), MemoryLayout<AudioBufferList>.size)
+        let raw = UnsafeMutableRawPointer.allocate(byteCount: byteCount,
+                                                   alignment: MemoryLayout<AudioBufferList>.alignment)
+        defer { raw.deallocate() }
+        raw.initializeMemory(as: UInt8.self, repeating: 0, count: byteCount)
+        let bufferList = raw.assumingMemoryBound(to: AudioBufferList.self)
         guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, bufferList) == noErr else { return false }
 
         let buffers = UnsafeMutableAudioBufferListPointer(bufferList)

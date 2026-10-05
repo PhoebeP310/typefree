@@ -1,8 +1,8 @@
 import Foundation
 
 /// 个人词库的统一读取入口，给三个识别路径共用同一份词表：
-/// - 火山 ASR：corpus.context 的 dialog_ctx 上下文（实测 极速版/标准版/2.0 均生效；
-///   旧的 {"hotwords":[...]} 内联格式只在流式接口文档里存在，录音文件接口会静默忽略）
+/// - 火山 ASR：corpus.context 里「热词直传 hotwords + dialog_ctx 提示句」一起传（2026-09-23 按官方文档改，
+///   16 句实测：组合 15/16 > 只用上下文 14/16 > 只用热词 11/16；极速版 / 标准版 / 2.0 均接受）
 /// - 百炼 qwen3-asr-flash：system 消息上下文（官方的定制化识别机制）
 /// - Omni：system 提示词附加词库段落
 public enum PersonalVocabulary {
@@ -61,6 +61,49 @@ public enum PersonalVocabulary {
         guard !words.isEmpty else { return nil }
         return "用户常说的词：" + words.joined(separator: "、")
     }
+
+    /// 火山 corpus.context 里词库的传法（2026-09-23 按官方文档核对后新增）。
+    ///
+    /// 官方《录音文件识别极速版 HTTP》（2026-09-22 版）与《热词与上下文最佳实践》（2026-08-25 版）写明：
+    /// - 词库这类固定专有名词，正规通道是「热词直传」：`{"hotwords":[{"word":"…"}]}`，非流式最多 5000 词；
+    /// - `dialog_ctx` 上下文是给对话历史 / 场景描述用的，上限 800 tokens（极速版文档写 500），超出截断；
+    /// - 两者可写在同一个 context 字段里，「上下文 + 热词的组合在非流式链路中效果最优」。
+    /// 以前只用 dialog_ctx 塞一句「用户常说的词：…」——能用，但走的不是热词通道，而且词一多会被 token 上限截掉。
+    public enum VolcanoVocabMode: String {
+        case context    // 旧做法：只传 dialog_ctx 提示句
+        case hotwords   // 只传热词直传列表
+        case both       // 热词直传 + dialog_ctx 提示句（官方推荐的组合）
+    }
+
+    /// 组装火山 corpus.context 的 JSON 对象；词表为空时返回 nil。
+    static func volcanoContextObject(words: [String], mode: VolcanoVocabMode) -> [String: Any]? {
+        guard !words.isEmpty else { return nil }
+        var obj: [String: Any] = [:]
+        if mode == .hotwords || mode == .both {
+            obj["hotwords"] = words.map { ["word": $0] }
+        }
+        if mode == .context || mode == .both, let sentence = contextSentence(for: words) {
+            obj["context_type"] = "dialog_ctx"
+            obj["context_data"] = [["text": sentence]]
+        }
+        return obj
+    }
+
+    /// 当前配置下火山 corpus.context 的 JSON 字符串；词库为空时返回 nil。
+    /// 传法可用隐藏配置 `asr_vocab_mode`（context / hotwords / both）覆盖，便于对比实测。
+    public static func volcanoContextJSON() -> String? {
+        guard let obj = volcanoContextObject(words: currentWords(), mode: currentVolcanoVocabMode()),
+              let data = try? JSONSerialization.data(withJSONObject: obj),
+              let str = String(data: data, encoding: .utf8) else { return nil }
+        return str
+    }
+
+    public static func currentVolcanoVocabMode() -> VolcanoVocabMode {
+        (loadRawConfig()["asr_vocab_mode"] as? String).flatMap(VolcanoVocabMode.init(rawValue:)) ?? defaultVolcanoVocabMode
+    }
+
+    /// 默认传法：实测对比后确定（见 volcanoContextJSON 的说明）。
+    static let defaultVolcanoVocabMode: VolcanoVocabMode = .both
 
     // MARK: - 从配置读取
 

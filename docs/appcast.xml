@@ -264,5 +264,14 @@
             <description><![CDATA[<h3>录音更顺手</h3><ul><li><strong>录音开始、结束有提示音</strong>：开始录音时会轻轻响一声，结束或取消时再响一声，不用盯着屏幕也知道录上没有。声音很轻，不喜欢可以在设置里关掉。</li><li><strong>录音时按 Esc 直接取消</strong>：单击开始、按住说话、鼠标长按，三种录音方式录到一半都能按 Esc 放弃。而且这下 Esc 只给 Typefree，不会顺带把你正在用的 App 里的弹窗、全屏也一起退掉。</li><li><strong>按键没按实也不会误停</strong>：按快捷键时如果键没压实、信号断了一下，以前会被当成松手，录音刚开始就结束了。现在刚按下时这种短暂的松开会被忽略，录音照常继续。</li></ul><h3>文字不再丢</h3><ul><li><strong>网页里光标不在输入框，文字也保得住</strong>：3.0.7 解决了普通 App 里的情况，这次补上网页：焦点落在网页正文上时，文字没粘进去就会留在剪贴板，并提示你按 ⌘V。</li><li><strong>提示不再互相覆盖</strong>：出字后如果接连有好几条提示，现在会一条接一条显示，「按 ⌘V 粘贴」这类要紧的提示不会被别的提示盖掉。</li></ul><h3>改一次错字，词库就记住</h3><ul><li><strong>识别错的词改一次就学会</strong>：出字后你在输入框里把识别错的词改对，Typefree 会把改对的词加进个人词库，下次优先认对，并弹提示告诉你学到了哪个词，不想要可以点「撤销」。以前同一个错要改两次才会记住，而且没有任何提示。</li><li><strong>人名只改一个字也能学</strong>：比如把「李俊梅」改成「吕俊梅」，也会学进词库。</li><li><strong>学得更准，不乱替换</strong>：只把改对的词加进词库、让识别时优先认它，不再生成「错法 → 正写」的强制替换规则（那种替换不看上下文，偶尔会把别处也改错）。同时按火山引擎最新的官方文档调整了词库的用法，词库里的词更容易认对。</li><li><strong>删掉的词不会再回来</strong>：在词库里删掉的词，以后不会再被自动加回来；点提示上的「撤销」只撤掉这一次。设置里这个开关也改名为「改过的词自动进词库」，说明写得更清楚。</li></ul><h3>小修正</h3><ul><li><strong>问 AI 时误点取消再点「撤销」</strong>：现在会重新把问题交给 AI 回答，不会再把问题当成普通文字打进当前窗口。</li></ul>]]></description>
             <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.8/Typefree-3.0.8.dmg" sparkle:edSignature="MnVbySV7ySqpFqzN7VVoGF0W7WBoHaPh4fmdMVtVcSee0lFJeuGmbnJ0lmVUi2lsrD5doBY7WICKfAvTCxhgAw==" length="2804847" type="application/octet-stream"/>
         </item>
+        <item>
+            <title>3.0.9</title>
+            <sparkle:version>3.0.9</sparkle:version>
+            <sparkle:shortVersionString>3.0.9</sparkle:shortVersionString>
+            <pubDate>Tue, 29 Sep 2026 15:01:05 +0000</pubDate>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>网络不好时不再卡住</h3><ul><li><strong>不会再一直停在「Thinking」</strong>：以前网络偶尔卡一下，Typefree 会一直等、还自动重试好几轮，最久要卡两三分钟才提示网络问题。现在等不到回音就会尽快提示，一段十几秒的话最多等半分钟左右。</li><li><strong>识别、整理过程中也能按 Esc 取消</strong>：以前只有录音时按 Esc 管用，说完之后在识别、整理时就只能干等。现在随时按 Esc 都能取消，取消后几秒内还可以点「撤销」找回。</li><li><strong>没识别出来的录音都留在历史里</strong>：识别失败的录音不管长短都会存进历史记录，点右侧「···」→「重试」就能重新识别，话不会白说。以前只有 20 秒以上的录音才会保留。</li></ul><h3>长段话不再丢后半截</h3><ul><li><strong>后半段没识别出来会告诉你</strong>：说长段话时，如果最后一小段因为网络问题没识别出来，以前只打出前半段、什么提示都没有。现在会先自动再试一次；还不行，就照常打出前半段，并提示后半段没识别出来。整段录音在历史记录里，可以点「重试」重新识别整段。</li></ul>]]></description>
+            <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.9/Typefree-3.0.9.dmg" sparkle:edSignature="HsXVWuBmLNo+p+TlJxAz2NxdpArbvsZdtmMxcads9VBqh1NebpXse+RWjeo2lwMBzEoYTFzmK1zk1zw9CMj9AQ==" length="2814903" type="application/octet-stream"/>
+        </item>
     </channel>
 </rss>

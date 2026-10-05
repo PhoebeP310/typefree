@@ -283,8 +283,7 @@ private final class HotkeyRecorderView: AppearanceObservingView {
 final class PolishHistoryStore {
     private let logFileURL: URL
 
-    init(logFileURL: URL = FileManager.default.homeDirectoryForCurrentUser
-        .appendingPathComponent(".config/voicepolish/polish_log.jsonl")) {
+    init(logFileURL: URL = VoicePolishConfig.shared.configDirectoryURL.appendingPathComponent("polish_log.jsonl")) {
         self.logFileURL = logFileURL
     }
 
@@ -1260,6 +1259,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     /// 引导正盖在窗口上时返回窗口编号：鼠标长按说话的监听器平时忽略自家窗口，只对它放行（「试一试」输入框）
     var guideWindowNumber: Int? { guideView != nil ? window?.windowNumber : nil }
 
+    /// 设置窗开着时返回窗口编号：里面的输入框（工单、词库、提示词……）也能按住说话；空白处不问 AI
+    var dictationWindowNumber: Int? { window?.isVisible == true ? window?.windowNumber : nil }
+
     func presentGuide(feature: WhatsNewGuide.Feature, finishTitle: String, onlyThisFeature: Bool = false) {
         guard let cv = window?.contentView else { return }
         if guideView == nil {
@@ -1316,6 +1318,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         loadVocabularyEntries()
         rebuildSidebar()
         selectPage(.home)
+        lastEnvironmentSnapshot = currentEnvironmentSnapshot()   // 首页刚按当前状态建好，以此为基准
         refreshTrialStatusIfNeeded()
         // 系统切换外观只刷新颜色，保留输入框、滚动位置和展开状态。
         (window.contentView as? AppearanceObservingView)?.onAppearanceChange = { [weak self] in
@@ -1436,9 +1439,42 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         }
     }
 
+    /// 首页 / 设置页里「App 不在前台时也会自己变」的东西：两个权限、登录项、输入统计。
+    /// 原先每次切回 App 都无条件重建这两页，而绝大多数切回来时这些值一个都没变，
+    /// 重建出来的页面和原来一模一样——纯属白做，偏偏这一步在 macOS 15 上崩过
+    /// （工单 #1005 的崩溃报告停在「重建首页 → 建换行文字标签」，#1007 的日志同一形状）。
+    /// 所以记一份上次重建时的值，真变了才重建；变了那条路和原来完全一样，用户看不出差别。
+    private struct EnvironmentSnapshot: Equatable {
+        var accessibilityTrusted: Bool
+        var microphoneAuthorization: Int
+        var launchAtLogin: Bool
+        var todayChars: Int
+        var todaySessions: Int
+        var allTimeChars: Int
+    }
+
+    private var lastEnvironmentSnapshot: EnvironmentSnapshot?
+
+    private func currentEnvironmentSnapshot() -> EnvironmentSnapshot {
+        let today = InputStats.shared.today()
+        return EnvironmentSnapshot(
+            accessibilityTrusted: AXIsProcessTrusted(),
+            microphoneAuthorization: AVCaptureDevice.authorizationStatus(for: .audio).rawValue,
+            launchAtLogin: LaunchAtLogin.isEnabled,
+            todayChars: today.charCount,
+            todaySessions: today.sessionCount,
+            allTimeChars: InputStats.shared.allTimeTotal().chars
+        )
+    }
+
     @objc private func permissionsMayHaveChanged() {
         DispatchQueue.main.async { [weak self] in
-            self?.invalidate(.home, .settings)
+            guard let self else { return }
+            let snapshot = self.currentEnvironmentSnapshot()
+            guard snapshot != self.lastEnvironmentSnapshot else { return }   // 什么都没变：不重建
+            self.lastEnvironmentSnapshot = snapshot
+            self.settingsDelegate?.debugLog("Settings: 权限/统计有变化，重建首页与设置页")
+            self.invalidate(.home, .settings)
         }
     }
 
@@ -1621,7 +1657,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         header.translatesAutoresizingMaskIntoConstraints = false
 
         // 创世用户（3.0 前的付费/受赠用户，Ray 2026-09-14）：logo 放大到 40，右侧两行——名字 + 版本号、创世用户标签——
-        // 整块与 logo 上下对齐。侧栏只有 178 点宽（可用 154），实测：名字 60、版本号 27、标签 54、NEW 34，两行都放得下
+        // 整块与 logo 上下对齐。
+        //
+        // ⚠ 宽度是这里唯一的难点，别再凭感觉调（2026-09-18 重量过）：侧栏 178，去掉两侧 8 的留白、
+        // logo 10+40 和 10 的间距、右侧 4 的余量，两行真正可用 98 点。实测文字宽度：
+        // 名字 60.1、版本号 26.8、创世用户胶囊 53.8、NEW 徽章 34.1（>=31 的宽度下限 + 左右各 6）。
+        // 旧版右侧留 8（可用 94），第一行 92.9、第二行 93.9，全是零点几点的余量——只要字体度量差一丝，
+        // 系统就压「创世用户」那个标签，它折成两行、胶囊变高往上顶，于是名字被盖、看起来像"变形"（Ray 截图）。
+        // 现在：有新版本时用 8 点的小红点代替 NEW 徽章（第二行降到 67.8），名字和标签都禁止折行。
         let isGenesis = LicenseManager.shared.isGenesis
         let logo = makeWaveformMark(box: isGenesis ? 40 : 28, corner: isGenesis ? 11 : 8, boxColor: theme.accent, waveColor: theme.onAccent)
 
@@ -1629,6 +1672,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         title.font = .systemFont(ofSize: 14, weight: .semibold)
         title.textColor = theme.text
         title.translatesAutoresizingMaskIntoConstraints = false
+        title.maximumNumberOfLines = 1
+        title.setContentCompressionResistancePriority(.required, for: .horizontal)   // 名字永远完整，不折不缩
 
         // 版本号：常驻显示，点它看「更新历史」（用户想知道"我在用哪一版、都更新了什么"）
         let version = NSTextField(labelWithString: Bundle.main.appVersionString)
@@ -1636,6 +1681,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         version.textColor = theme.text3
         version.translatesAutoresizingMaskIntoConstraints = false
         version.toolTip = "查看更新历史"
+        version.maximumNumberOfLines = 1
+        version.lineBreakMode = .byTruncatingTail
+        version.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)   // 真放不下时，让它先截断
 
         header.addSubview(logo)
         header.addSubview(title)
@@ -1651,7 +1699,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         var trailingView: NSView = version
         if let updateInfo = settingsDelegate?.pendingUpdateInfo(), updateInfo.errorMessage == nil {
-            let badge = makeNewBadge()
+            // 小红点代替 NEW 徽章：见上面的宽度账。非创世用户那一行（名字+版本号+NEW＝128）同样放不下，
+            // 所以两种排版都用红点；整块 header 仍可点，提示文案不变。
+            let badge = makeNewDot()
             header.addSubview(badge)
             // 创世用户排版里，NEW 放到第二行标签后面（第一行放不下）
             let anchorView: NSView = genesisTag ?? version
@@ -1679,7 +1729,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 version.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
                 tag.leadingAnchor.constraint(equalTo: title.leadingAnchor),
                 tag.bottomAnchor.constraint(equalTo: logo.bottomAnchor),
-                trailingView.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -8),
+                trailingView.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -4),
                 header.heightAnchor.constraint(equalToConstant: 58),
             ])
         } else {
@@ -1690,7 +1740,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 title.centerYAnchor.constraint(equalTo: header.centerYAnchor),
                 version.leadingAnchor.constraint(equalTo: title.trailingAnchor, constant: 7),
                 version.firstBaselineAnchor.constraint(equalTo: title.firstBaselineAnchor),
-                trailingView.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -8),
+                trailingView.trailingAnchor.constraint(lessThanOrEqualTo: header.trailingAnchor, constant: -4),
                 header.heightAnchor.constraint(equalToConstant: 42),
             ])
         }
@@ -1897,6 +1947,22 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             notes.addAttribute(.foregroundColor, value: imported.cssHex == headingHex ? headingColor : bodyColor, range: range)
         }
         return notes
+    }
+
+    /// 侧栏顶部「有新版本」提示：8 点小红点。
+    /// 原来是 NEW 文字徽章（34 点宽），侧栏那两行只有 98 点可用，加上它必挤——见 makeBrandHeader 里的宽度账。
+    private func makeNewDot() -> NSView {
+        let dot = NSView()
+        dot.wantsLayer = true
+        dot.translatesAutoresizingMaskIntoConstraints = false
+        dot.layer?.cornerRadius = 4
+        dot.layer?.setAppearanceBackground(NSColor(hex: 0xE5484D))
+        dot.toolTip = "有新版本，点击查看"
+        NSLayoutConstraint.activate([
+            dot.widthAnchor.constraint(equalToConstant: 8),
+            dot.heightAnchor.constraint(equalToConstant: 8),
+        ])
+        return dot
     }
 
     private func makeNewBadge() -> NSView {
@@ -3225,6 +3291,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         v.layer?.setAppearanceBackground(bg)
         let l = label(text, size: size, weight: .semibold, color: fg)
         l.translatesAutoresizingMaskIntoConstraints = false
+        l.maximumNumberOfLines = 1
+        l.setContentCompressionResistancePriority(.required, for: .horizontal)   // 宁可溢出也不折行：折行会把胶囊撑高、压到上一行
         v.addSubview(l)
         let hPad: CGFloat = size < 11 ? 7 : 8
         let vPad: CGFloat = size < 11 ? 2.5 : 2
@@ -3703,7 +3771,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let asrHosted = hostedRow(ownKey: asrOK)
         let polishHosted = hostedRow(ownKey: polishOK)
 
-        let rows: [(String, String, Bool, String, Selector?)] = [
+        var rows: [(String, String, Bool, String, Selector?)] = [
             ("麦克风", micStatus.sub, micStatus.ok, micStatus.tail,
              micStatus.ok ? nil : #selector(healthMicRowTapped)),
             ("辅助功能", accessOK ? "可自动粘贴" : "未开启只能复制到剪贴板，点击去系统设置开启",
@@ -3722,6 +3790,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                         ? ("AI 润色", "可整理文本", true, "已配置", nil)
                         : ("AI 润色", "请填写润色 Key", false, "未配置", nil),
         ]
+        // 设置写不进磁盘时明确亮出来（工单 #9：以前只记日志，用户只看到「每次打开都像第一次」）。
+        // 已自动退到备用位置且写得进去的，不算问题，不显示。
+        if let failure = VoicePolishConfig.shared.lastWriteFailure {
+            rows.append(("设置存储", "写不进磁盘，改动不会保存：\(failure)", false, "无法保存", nil))
+        }
 
         let allOK = rows.allSatisfy { $0.2 }
         let failCount = rows.filter { !$0.2 }.count
@@ -4007,7 +4080,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.setCustomSpacing(8, after: audioTitle)
         let audioCard = makeAudioCard()
         stack.addArrangedSubview(audioCard)
-        stack.setCustomSpacing(24, after: audioCard)
+        stack.setCustomSpacing(10, after: audioCard)
+        let cueCard = makeCueSoundCard()
+        stack.addArrangedSubview(cueCard)
+        stack.setCustomSpacing(24, after: cueCard)
 
         let hotkeyTitle = sectionTitle("快捷键")
         stack.addArrangedSubview(hotkeyTitle)
@@ -4149,6 +4225,50 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         mount(row, in: card)
         return card
+    }
+
+    /// 录音提示音开关（工单 #1003）。布局照抄 Dock 开关卡片。
+    private func makeCueSoundCard() -> NSView {
+        let card = makeCard()
+
+        let title = label("录音提示音", size: 14, weight: .medium, color: theme.text)
+        let desc = label("开始收音和结束录音时各响一声轻音，不用看屏幕也知道录上了。",
+                         size: 12, weight: .regular, color: theme.text3)
+        desc.maximumNumberOfLines = 0
+
+        let toggle = VPToggle(theme: theme, target: self, action: #selector(cueSoundChanged(_:)))
+        toggle.setOn(CuePlayer.shared.isEnabled, animated: false)
+        toggle.setAccessibilityLabel("录音提示音")
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.addArrangedSubview(title)
+        textStack.addArrangedSubview(desc)
+        textStack.setHuggingPriority(.defaultLow, for: .horizontal)
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.distribution = .fill
+        row.spacing = 16
+        row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        row.addArrangedSubview(textStack)
+        row.addArrangedSubview(spacer)
+        row.addArrangedSubview(toggle)
+
+        mount(row, in: card)
+        return card
+    }
+
+    @objc private func cueSoundChanged(_ sender: VPToggle) {
+        CuePlayer.shared.isEnabled = sender.isOn
+        if sender.isOn { CuePlayer.shared.play(.start, force: true) }   // 打开时响一下，让用户知道是什么声音
     }
 
     private func makeDockIconCard() -> NSView {
@@ -5086,8 +5206,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private func makeAutoLearnCard() -> NSView {
         let card = makeCard()
 
-        let title = label("自动学习（词汇与风格）", size: 14, weight: .medium, color: theme.text)
-        let desc = label("根据你的日常输入自动学习常用词汇和表达习惯，越用越懂你。学到的词在下方列表可随时删除，删过的不再学。", size: 12, weight: .regular, color: theme.text3)
+        // 2026-09-23 实话实说：这个开关实际只管「改过的错词进词库」。原文案说的「日常输入学常用词」9-11 已停、
+        // 「表达习惯」只统计没交给润色用过（观察期），不再写进说明。
+        let title = label("改过的词自动进词库", size: 14, weight: .medium, color: theme.text)
+        let desc = label("识别错的词你改过一次，就会加进词库，下次优先认对。学到时会提示，可以撤销；从词库删掉的词不会再自动加回来。", size: 12, weight: .regular, color: theme.text3)
 
         let toggle = VPToggle(theme: theme, target: self, action: #selector(autoLearnChanged(_:)))
         toggle.setOn(config.bool(forKey: "term_corrections_auto_learn_enabled", defaultValue: true), animated: false)

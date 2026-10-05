@@ -31,12 +31,20 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
     /// 驱动一次 ingest，等提交处理完；返回是否真的提交了（不再有可提交段时返回 false，不失败）
     @discardableResult
     private func ingestOnce(_ session: StreamingTranscriptionSession, _ snapshot: [Float]) -> Bool {
-        let exp = expectation(description: "commit")
-        session.onCommitProcessed = { _ in exp.fulfill() }
+        // 「提交了」和「这次没东西可提交」各有一个钩子，哪个先响就是哪个结果——不靠超时判定。
+        // 原先用 0.4s 超时当「没提交」的判据：慢机器（CI）上可能把一次真提交判成没提交，
+        // drainCommits 提前收手、后面的断言跟着失败；单纯把超时放宽又会让整套测试从 12s 变 46s。
+        let settled = expectation(description: "ingest settled")
+        settled.assertForOverFulfill = false
+        var didCommit = false
+        session.onCommitProcessed = { _ in didCommit = true; settled.fulfill() }
+        session.onIngestIdle = { settled.fulfill() }
         session.ingest(snapshot: snapshot)
-        let result = XCTWaiter().wait(for: [exp], timeout: 0.4)
+        let outcome = XCTWaiter().wait(for: [settled], timeout: 5)
         session.onCommitProcessed = nil
-        return result == .completed
+        session.onIngestIdle = nil
+        XCTAssertEqual(outcome, .completed, "ingest 既没提交也没报空闲，说明卡住了")
+        return didCommit
     }
 
     /// 反复 ingest 直到不再产生新提交
@@ -70,6 +78,75 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
             exp.fulfill()
         }
         wait(for: [exp], timeout: 3)
+    }
+
+    // MARK: - 尾巴识别失败（工单 #1024 同类：以前悄悄只给前半段，后半截话凭空消失）
+
+    private struct FakeError: Error {}
+
+    /// 尾巴第一次失败、第二次成功 → 照常拼全文
+    func testTailFailureRetriesOnce() {
+        var tailCalls = 0
+        let lock = NSLock()
+        let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
+            DispatchQueue.global().async { done(.success("C")) }
+        }, tailTranscriber: { _, done in
+            lock.lock(); tailCalls += 1; let n = tailCalls; lock.unlock()
+            DispatchQueue.global().async { done(n == 1 ? .failure(FakeError()) : .success("尾")) }
+        })
+        let snapshot = speechWithPauses(blocks: 6)
+        drainCommits(session, snapshot)
+        let exp = expectation(description: "finish")
+        session.finish(finalSamples: snapshot) { result in
+            guard case .success(let text) = result else { return XCTFail("重试后应成功") }
+            XCTAssertTrue(text.hasSuffix("尾"))
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+        XCTAssertEqual(tailCalls, 2)
+    }
+
+    /// 尾巴两次都失败、前面已有文字 → 不再悄悄当成功，交出前半段让上层提醒
+    func testTailFailsTwiceReturnsPartialError() {
+        let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
+            DispatchQueue.global().async { done(.success("C")) }
+        }, tailTranscriber: { _, done in
+            DispatchQueue.global().async { done(.failure(FakeError())) }
+        })
+        let snapshot = speechWithPauses(blocks: 6)
+        drainCommits(session, snapshot)
+        XCTAssertFalse(session.committedText.isEmpty)
+        let exp = expectation(description: "finish")
+        session.finish(finalSamples: snapshot) { result in
+            guard case .failure(let error) = result,
+                  let partial = error as? StreamingTranscriptionSession.PartialResultError else {
+                return XCTFail("应返回 PartialResultError")
+            }
+            XCTAssertFalse(partial.text.isEmpty)
+            XCTAssertEqual(partial.text, String(repeating: "C", count: partial.text.count))
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+    }
+
+    /// 前面什么都没识别出来时尾巴失败 → 直接报错，不重试（调用方会整段重识别）
+    func testTailFailureWithoutCommitReportsError() {
+        var tailCalls = 0
+        let lock = NSLock()
+        let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
+            DispatchQueue.global().async { done(.success("C")) }
+        }, tailTranscriber: { _, done in
+            lock.lock(); tailCalls += 1; lock.unlock()
+            DispatchQueue.global().async { done(.failure(FakeError())) }
+        })
+        let exp = expectation(description: "finish")
+        session.finish(finalSamples: speech(5)) { result in
+            guard case .failure(let error) = result else { return XCTFail("应失败") }
+            XCTAssertFalse(error is StreamingTranscriptionSession.PartialResultError)
+            exp.fulfill()
+        }
+        wait(for: [exp], timeout: 3)
+        XCTAssertEqual(tailCalls, 1)
     }
 
     // MARK: - 连续说话无停顿 → 不提交，退化为整段(仅尾巴)

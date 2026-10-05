@@ -8,7 +8,11 @@ extension Notification.Name {
     static let voicePolishTermCorrectionsDidChange = Notification.Name("VoicePolishTermCorrectionsDidChange")
 }
 
-/// 术语纠正自动学习：粘贴文字后监控输入框变化，自动提取用户的修正词加入术语纠正
+/// 术语纠正自动学习：粘贴文字后监控输入框变化，用户改对了识别错的词，就把改对的词加进词库当热词。
+///
+/// 2026-09-23（工单 #1013，Ray 拍板 A 方案）：改一次就学，只加词、不再生成「错法 → 正写」强制替换规则；
+/// 选词、限量、撤销的规则在 VoicePolishCore/VocabularyLearning（照火山官方热词最佳实践）。
+/// 下面的 requiredLearnCount / 候选（candidates）逻辑只剩老数据清理在用，学词不再走它。
 ///
 /// 安全策略：
 /// - 只对比"投递文字"区间内的改动，忽略输入框中其他内容的变化
@@ -59,6 +63,10 @@ final class HotWordsAutoLearner {
     private var deliveredRange: Range<String.Index>?  // 投递文字在输入框中的位置
     private var monitorStartTime: Date?
     private var pendingEditedSegment: String?
+    /// 这次监控里输入框内容的每一版（按时间顺序）。只看最后一版不够：飞书里改完一个字半秒后，
+    /// 输入框会多出一段文字插在光标附近（Ray 9-23 实测 11→29 字），最后一版判不出「李→吕」，
+    /// 刚改完那一版是干净的。定稿时最后一版判不出来，就往前找。
+    private var editedSnapshots: [String] = []
     private var pendingEditedAt: Date?
     private var lastLearnedSegment: String?
 
@@ -80,8 +88,9 @@ final class HotWordsAutoLearner {
     /// 编辑停止多久后，认为这段文字已经定稿
     private let idleFinalizeDelay: TimeInterval = 4
 
-    /// 粘贴后如果读不到输入框，直接跳过本次学习，避免后台重试干扰主体验。
-    private let startRetryCount = 1
+    /// 粘贴后读不到输入框（或还没读到刚粘进去的文字）时再试几次。2026-09-23 实测约一天 70 次出字只有 44 次盯上，
+    /// ChatGPT、Notion 这类网页 App 粘贴后要过一会儿才能从辅助功能读到新文字，原先只试一次就放弃了。
+    private let startRetryCount = 3
     private let startRetryDelay: TimeInterval = 0.5
 
     var debugLog: ((String) -> Void)?
@@ -142,6 +151,7 @@ final class HotWordsAutoLearner {
 
     private func retryStartMonitoring(deliveredText: String, attemptsRemaining: Int, reason: String) {
         guard attemptsRemaining > 1 else {
+            debugLog?("AutoLearn: \(reason)，放弃本次监控")
             return
         }
 
@@ -167,6 +177,7 @@ final class HotWordsAutoLearner {
         deliveredRange = nil
         monitorStartTime = nil
         pendingEditedSegment = nil
+        editedSnapshots = []
         pendingEditedAt = nil
         lastLearnedSegment = nil
     }
@@ -176,6 +187,7 @@ final class HotWordsAutoLearner {
     }
 
     /// 手动纠正：对比原始输出和用户修改后的文字，提取术语纠正并保存
+    /// 返回这次新加进词库的词（空 = 没有值得加的新词）。
     func learnFromManualCorrection(original: String, corrected: String) -> [String] {
         debugLog?("ManualLearn: comparing originalChars=\(original.count), correctedChars=\(corrected.count)")
         // 用户在纠正框里明确教的，不做「读音相近」把关
@@ -184,11 +196,56 @@ final class HotWordsAutoLearner {
             debugLog?("ManualLearn: no learnable corrections found")
             return []
         }
-        _ = saveCorrections(corrections, requireConfirmation: false)
-        let descriptions = corrections.map { "\($0.variant) → \($0.target)" }
-        debugLog?("ManualLearn: learned count=\(descriptions.count)")
-        onLearned?(descriptions)
-        return descriptions
+        // 提示由调用方弹：「纠正上次结果」弹「已加入词库 · 撤销」；历史记录里改字是静默学（在设置窗里，不打扰）。
+        // 以前这里和调用方各弹一次，胶囊连弹两遍。
+        return learnWords(corrections.map(\.target), in: corrected, reason: "manual")
+    }
+
+    /// 把改对的词加进词库（只加词、不加替换规则），返回新加的词。选词 / 限量规则见 VocabularyLearning。
+    private func learnWords(_ targets: [String], in sentence: String, reason: String) -> [String] {
+        // 纠错提取常是半截词（「况思远→邝思远」提取成「了邝」），先扩成完整的词再判断值不值得学
+        let learnable = targets.map { VocabularyLearning.expandToWord($0, in: sentence) }
+            .filter { VocabularyLearning.isLearnableWord($0) }
+        let skipped = targets.count - learnable.count
+        if skipped > 0 { debugLog?("AutoLearn: \(skipped) 个改动是常用词或半截词，不加进词库(\(reason))") }
+        guard !learnable.isEmpty,
+              let data = try? Data(contentsOf: config.configFileURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return [] }
+        let entries = json["term_corrections"] as? [[String: Any]] ?? []
+        let ledger = json[VocabularyLearning.ledgerKey] as? [[String: String]] ?? []
+        let dismissed = json[VocabularyLearning.dismissedKey] as? [String] ?? []
+        let update = VocabularyLearning.addLearnedWords(learnable, entries: entries, ledger: ledger, dismissed: dismissed,
+                                                         today: VocabularyLearning.dayString())
+        guard !update.added.isEmpty || update.ledger != ledger || update.dismissed != dismissed else {
+            debugLog?("AutoLearn: 改对的词已在词库里或用户删过，不加(\(reason))")
+            return []
+        }
+        if update.added.isEmpty { debugLog?("AutoLearn: 改对的词已在词库里或用户删过，不加(\(reason))") }
+        config.save(values: ["term_corrections": update.entries,
+                             VocabularyLearning.ledgerKey: update.ledger,
+                             VocabularyLearning.dismissedKey: update.dismissed])
+        NotificationCenter.default.post(name: .voicePolishTermCorrectionsDidChange, object: nil)
+        if !update.added.isEmpty {
+            debugLog?("AutoLearn: 加进词库 \(update.added.count) 个词\(update.evicted.isEmpty ? "" : "，挤出最早学的 \(update.evicted.count) 个")(\(reason))")
+        }
+        return update.added
+    }
+
+    /// 撤销刚学到的词（「已加入词库 · 撤销」）
+    func undoLearnedWords(_ words: [String]) {
+        guard let data = try? Data(contentsOf: config.configFileURL),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            debugLog?("UndoLearn: failed to read config")
+            return
+        }
+        let result = VocabularyLearning.removeLearnedWords(words,
+                                                           entries: json["term_corrections"] as? [[String: Any]] ?? [],
+                                                           ledger: json[VocabularyLearning.ledgerKey] as? [[String: String]] ?? [])
+        guard !result.removed.isEmpty else { return }
+        // 撤销只删这一次，不拉黑：下次再改同样的错还会学（只有在词库页删掉的才不再学）
+        config.save(values: ["term_corrections": result.entries, VocabularyLearning.ledgerKey: result.ledger])
+        NotificationCenter.default.post(name: .voicePolishTermCorrectionsDidChange, object: nil)
+        debugLog?("UndoLearn: removed \(result.removed.count) word(s)")
     }
 
     func confirmPendingCorrections(_ descriptions: [String]) -> [String] {
@@ -203,52 +260,6 @@ final class HotWordsAutoLearner {
         guard !corrections.isEmpty else { return [] }
         return saveCorrections(corrections, requireConfirmation: false).added
     }
-
-    /// 撤销最近学到的术语纠正（按描述匹配，如 "variant → target"）
-    func undoLearnedCorrections(_ descriptions: [String]) {
-        guard let data = try? Data(contentsOf: config.configFileURL),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            debugLog?("UndoLearn: failed to read config")
-            return
-        }
-
-        var entries = loadStoredCorrections(from: json)
-        var didChange = false
-
-        for desc in descriptions {
-            // Parse "variant → target"
-            let parts = desc.components(separatedBy: " → ")
-            guard parts.count == 2 else { continue }
-            let variant = parts[0].trimmingCharacters(in: .whitespaces)
-            let target = parts[1].trimmingCharacters(in: .whitespaces)
-
-            if let entryIndex = entries.firstIndex(where: { $0.target.caseInsensitiveCompare(target) == .orderedSame }) {
-                entries[entryIndex].variants.removeAll { $0.caseInsensitiveCompare(variant) == .orderedSame }
-                if entries[entryIndex].variants.isEmpty {
-                    entries.remove(at: entryIndex)
-                }
-                didChange = true
-                debugLog?("UndoLearn: removed one correction")
-            }
-        }
-
-        guard didChange else { return }
-
-        let updatedEntries = entries.map { entry in
-            [
-                "target": entry.target,
-                "variants": entry.variants,
-                "category": entry.category,
-                "source": entry.source
-            ]
-        }
-
-        config.save(values: ["term_corrections": updatedEntries])
-        NotificationCenter.default.post(name: .voicePolishTermCorrectionsDidChange, object: nil)
-        debugLog?("UndoLearn: config updated")
-    }
-
-    // MARK: - 检测变化
 
     private func checkForChanges() {
         if let start = monitorStartTime, Date().timeIntervalSince(start) > monitorDuration {
@@ -314,6 +325,7 @@ final class HotWordsAutoLearner {
 
         if trimmedEditedSegment != delivered.trimmingCharacters(in: .whitespacesAndNewlines) {
             pendingEditedSegment = editedSegment
+            if editedSnapshots.last != editedSegment { editedSnapshots.append(editedSegment) }
             pendingEditedAt = Date()
             debugLog?("AutoLearn: 已记录候选修改，等待定稿")
         }
@@ -688,22 +700,43 @@ final class HotWordsAutoLearner {
             return
         }
 
-        let corrections = extractCorrections(original: delivered, edited: pendingEditedSegment)
-        guard !corrections.isEmpty else {
-            debugLog?("AutoLearn: finalize(\(reason)): diff found no learnable corrections, beforeChars=\(delivered.count), afterChars=\(pendingEditedSegment.count)")
+        // 先看最后一版；判不出来再往前找刚改完时的干净版本（跳过正在打拼音的中间状态）
+        var candidates = [pendingEditedSegment]
+        for snapshot in editedSnapshots.reversed() where !candidates.contains(snapshot) && snapshot != delivered {
+            if VocabularyLearning.looksLikeComposition(snapshot, delivered: delivered, final: pendingEditedSegment) { continue }
+            candidates.append(snapshot)
+        }
+        if config.bool(forKey: "autolearn_debug_text", defaultValue: false) {
+            // 诊断开关（默认关，只在开发机上临时打开）：记下原文和每一版，用来查输入框里多出了什么
+            debugLog?("AutoLearn[debug] 原文: \(delivered)")
+            for (i, c) in candidates.enumerated() { debugLog?("AutoLearn[debug] 候选\(i): \(c)") }
+            for (i, c) in editedSnapshots.enumerated() { debugLog?("AutoLearn[debug] 第\(i)版: \(c)") }
+        }
+        var chosen: (text: String, corrections: [LearnedTermCorrection])?
+        for (i, candidate) in candidates.enumerated() {
+            // 先不卡读音、把所有短替换都提出来，再逐条判断：读音相近，或改的是人名 / 地名 / 机构名 / 英文词，才学
+            // （「李俊梅 → 吕俊梅」读音规则判不像，但显然是在改名字，见 VocabularyLearning.shouldLearn）
+            let found = extractCorrections(original: delivered, edited: candidate, requireSoundAlike: false)
+                .filter { VocabularyLearning.shouldLearn(variant: $0.variant, target: $0.target, in: candidate) }
+            let learnable = found.filter { VocabularyLearning.isLearnableWord(VocabularyLearning.expandToWord($0.target, in: candidate)) }
+            if !learnable.isEmpty {
+                if i > 0 { debugLog?("AutoLearn: 最后一版判不出来，改用第 \(i) 个较早版本（输入框改完后多出了内容）") }
+                chosen = (candidate, learnable)
+                break
+            }
+        }
+        guard let chosen else {
+            debugLog?("AutoLearn: finalize(\(reason)): diff found no learnable corrections, beforeChars=\(delivered.count), afterChars=\(pendingEditedSegment.count), 版本数=\(candidates.count)")
             return
         }
 
-        debugLog?("AutoLearn: 定稿后学习(\(reason)): count=\(corrections.count)")
-        let persisted = saveCorrections(corrections)
+        debugLog?("AutoLearn: 定稿后学习(\(reason)): count=\(chosen.corrections.count)")
+        let added = learnWords(chosen.corrections.map(\.target), in: chosen.text, reason: reason)
         lastLearnedSegment = pendingEditedSegment
 
-        // 安静学习：第一次修改只默默记成候选（已写入配置），不弹任何东西打扰用户。
-        // 只有第二次重复同样的修改、候选被正式采纳（added）后，才弹出可撤销的小提示。
-        DispatchQueue.main.async { [weak self] in
-            if !persisted.added.isEmpty {
-                self?.onLearned?(persisted.added)
-            }
+        // 改一次就学（2026-09-23 起）：新加进词库的词马上弹「已加入词库 · 撤销」
+        if !added.isEmpty {
+            DispatchQueue.main.async { [weak self] in self?.onLearned?(added) }
         }
     }
 

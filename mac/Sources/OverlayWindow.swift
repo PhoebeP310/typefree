@@ -350,9 +350,9 @@ class OverlayWindow {
         showCapsuleBar(message, accent: .error, seconds: seconds)
     }
 
-    /// "已学会「xx」· 撤销"：绿点，5 秒后自动消失。
+    /// "已加入词库「xx」· 撤销"：绿点，5 秒后自动消失（2026-09-23 起改一次就学、只加词）。
     private func showLearnedCapsule(description: String) {
-        showCapsuleBar("已学会「\(description)」", accent: .success, seconds: 5.0,
+        showCapsuleBar("已加入词库「\(description)」", accent: .success, seconds: 5.0,
                        actions: [CapsuleAction(title: "撤销", primary: false, action: #selector(undoLearnedTapped))])
     }
 

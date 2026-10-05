@@ -130,6 +130,21 @@ public final class TrialManager {
 
     // MARK: - 刷新（联网）
 
+    /// 「用户填了自己的 API Key」的查询钩子，由 App 启动时设好（Core 拿不到 App 的配置对象）。
+    /// nil = 这个端不知道 → 握手不带 own_key，服务器保留原值，后台仍按试用显示。
+    public static var ownKeyConfiguredProvider: (() -> Bool)?
+
+    /// 握手请求体（纯函数，便于单测）。own_key 只在 App 明确知道时才带。
+    static func startBody(deviceID: String, appVersion: String, osVersion: String,
+                          selfChars: Int, selfReqs: Int, ownKeyConfigured: Bool?) -> [String: Any] {
+        var body: [String: Any] = ["device_id": deviceID,
+                                   "app_version": appVersion,
+                                   "os_version": osVersion,
+                                   "usage": ["chars": selfChars, "requests": selfReqs]]
+        if let ownKeyConfigured { body["own_key"] = ownKeyConfigured }
+        return body
+    }
+
     /// 向服务器拉取 / 刷新试用状态（POST /trial/start）。
     ///
     /// - 成功 → 缓存 token / daysLeft / usedToday / dailyLimit / lastRefreshAt，清除 expired 标记。
@@ -147,10 +162,10 @@ public final class TrialManager {
         let suite = Self.sharedSuite
         let selfChars = suite?.integer(forKey: Self.kSelfChars) ?? 0
         let selfReqs  = suite?.integer(forKey: Self.kSelfReqs) ?? 0
-        let body: [String: Any] = ["device_id": deviceID,
-                    "app_version": appVersion,
-                    "os_version": "\(os.majorVersion).\(os.minorVersion)",
-                    "usage": ["chars": selfChars, "requests": selfReqs]]
+        let body = Self.startBody(deviceID: deviceID, appVersion: appVersion,
+                                  osVersion: "\(os.majorVersion).\(os.minorVersion)",
+                                  selfChars: selfChars, selfReqs: selfReqs,
+                                  ownKeyConfigured: Self.ownKeyConfiguredProvider?())
         post(path: "/trial/start", body: body) { [weak self] result in
             guard let self = self else { return }
             switch result {

@@ -70,9 +70,12 @@ private struct TypefreeUpdateDialogModel {
     let notes: String
     let notesIsHTML: Bool          // 更新说明是 appcast 的 HTML → 富文本渲染；错误信息是纯文本
     let primaryTitle: String
+    /// nil = 这一刻不需要副按钮。按钮照样建出来、先隐藏，状态一变（下载完 → 可以「稍后」）能直接显示，不用重建窗口。
     let secondaryTitle: String?
     let primaryEnabled: Bool
     let isError: Bool
+    /// 0…1：显示下载进度条；nil：隐藏进度条。
+    var progress: Double? = nil
 }
 
 /// 翻转坐标的容器：作为 NSScrollView 的 documentView 时内容从顶部开始显示。
@@ -80,14 +83,43 @@ private final class TopAnchoredView: NSView {
     override var isFlipped: Bool { true }
 }
 
+/// 卡片底部的渐隐遮罩：上端透明、下端是卡片底色，用来提示"下面还有内容"。不拦鼠标，滚动照常。
+private final class BottomFadeView: NSView {
+    private let gradient = CAGradientLayer()
+
+    init(color: NSColor) {
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        wantsLayer = true
+        gradient.colors = [color.withAlphaComponent(0).cgColor, color.cgColor]
+        gradient.startPoint = CGPoint(x: 0.5, y: 1)   // 顶端透明
+        gradient.endPoint = CGPoint(x: 0.5, y: 0)     // 底端不透明
+        layer?.addSublayer(gradient)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func layout() {
+        super.layout()
+        gradient.frame = bounds
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 @MainActor
 private final class TypefreeUpdateDialogController: NSWindowController, NSWindowDelegate {
-    private let onPrimary: () -> Void
+    /// 主按钮点完窗口是关是留，由调用方明说——不能再有"默认不关"这种隐式行为：
+    /// 3.0.4 把「点了先关窗」改成「不关窗」时漏了「已是最新版本」那个「好」，结果窗口点不掉（Ray 2026-09-18）。
+    /// 写成返回值，编译器会逼每个调用点表态。
+    enum PrimaryOutcome { case close, keepOpen }
+
+    private let onPrimary: () -> PrimaryOutcome
     private let onSecondary: () -> Void
     private let onClose: () -> Void
 
     init(model: TypefreeUpdateDialogModel,
-         onPrimary: @escaping () -> Void,
+         onPrimary: @escaping () -> PrimaryOutcome,
          onSecondary: @escaping () -> Void,
          onClose: @escaping () -> Void) {
         self.onPrimary = onPrimary
@@ -96,7 +128,8 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
 
         let isStatusOnly = model.badge == "OK"
         let window = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 468, height: isStatusOnly ? 342 : 466),
+            // 高度随内容长了一点：多了 4 点进度条（含上下间距共 10 点）+ 更新说明卡片 200→230
+            contentRect: NSRect(x: 0, y: 0, width: 468, height: isStatusOnly ? 352 : 506),
             styleMask: [.titled, .closable, .fullSizeContentView],
             backing: .buffered,
             defer: false
@@ -123,15 +156,46 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
 
     func show() {
         guard let window else { return }
-        window.center()
+        centerOnScreen(window)
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 
-    /// 实时刷新副标题（下载进度 / 安装状态），无需重建整个对话框——避免下载过程中窗口闪烁、丢焦点。
-    func applyLiveState(subtitle: String) {
+    /// NSWindow.center() 是"水平居中、垂直放在偏上约 1/3 处"，看起来就是没居中（Ray 2026-09-18）。
+    /// 这里按主窗口所在屏幕的可用区域（去掉菜单栏和程序坞）正正地居中。
+    private func centerOnScreen(_ window: NSWindow) {
+        let screen = NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen ?? NSScreen.main
+        guard let visible = screen?.visibleFrame else { window.center(); return }
+        let size = window.frame.size
+        window.setFrameOrigin(NSPoint(
+            x: visible.minX + ((visible.width - size.width) / 2).rounded(),
+            y: visible.minY + ((visible.height - size.height) / 2).rounded()
+        ))
+    }
+
+    /// 实时刷新副标题、进度条和按钮文字，无需重建整个对话框——避免下载过程中窗口闪烁、丢焦点。
+    func applyLiveState(subtitle: String, progress: Double?, primaryTitle: String, secondaryTitle: String?) {
         guard let root = window?.contentView else { return }
         Self.findSubtitle(in: root)?.stringValue = subtitle
+
+        if let bar = Self.findProgressBar(in: root) {
+            bar.isHidden = progress == nil
+            if let progress { bar.doubleValue = max(0, min(1, progress)) * 100 }
+        }
+        if let primary = Self.findButton(role: .primary, in: root) {
+            primary.setDisplayTitle(primaryTitle)
+        }
+        if let secondary = Self.findButton(role: .secondary, in: root) {
+            secondary.isHidden = secondaryTitle == nil
+            if let secondaryTitle { secondary.setDisplayTitle(secondaryTitle) }
+        }
+    }
+
+    /// 安装已经开始：按钮不再可点，避免用户连点。
+    func lockButtons() {
+        guard let root = window?.contentView else { return }
+        Self.findButton(role: .primary, in: root)?.isEnabled = false
+        Self.findButton(role: .secondary, in: root)?.isHidden = true
     }
 
     private static func findSubtitle(in view: NSView) -> NSTextField? {
@@ -142,13 +206,35 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
         return nil
     }
 
+    private static func findProgressBar(in view: NSView) -> NSProgressIndicator? {
+        if let bar = view as? NSProgressIndicator, bar.identifier?.rawValue == "typefree.update.progress" { return bar }
+        for sub in view.subviews {
+            if let found = findProgressBar(in: sub) { return found }
+        }
+        return nil
+    }
+
+    private static func findButton(role: TypefreeUpdateButton.Role, in view: NSView) -> TypefreeUpdateButton? {
+        if let button = view as? TypefreeUpdateButton, button.role == role { return button }
+        for sub in view.subviews {
+            if let found = findButton(role: role, in: sub) { return found }
+        }
+        return nil
+    }
+
     func windowWillClose(_ notification: Notification) {
         onClose()
     }
 
+    /// 主按钮不再一律"先关窗口再干活"（Ray 2026-09-18：点完只看到窗口消失，以为更新好了，其实什么也没发生）。
+    /// 下载／安装类动作留着窗口显示进度，其余动作照常关——由 onPrimary 的返回值决定。
     @objc private func primaryTapped() {
+        if onPrimary() == .close { window?.close() }
+    }
+
+    /// 兜底：Esc 一定能关掉。这个窗口的红绿灯按钮是隐藏的，万一按钮逻辑再出岔子，用户不至于被困住。
+    override func cancelOperation(_ sender: Any?) {
         window?.close()
-        onPrimary()
     }
 
     @objc private func secondaryTapped() {
@@ -251,8 +337,17 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
         scroll.translatesAutoresizingMaskIntoConstraints = false
         notesCard.addSubview(notesTitle)
         notesCard.addSubview(scroll)
+        // 更新说明超出一屏时底部加渐隐，提示"下面还有"——原先内容正好从半行处被切断，看着像排版坏了（Ray 2026-09-18）
+        let fade = BottomFadeView(color: NSColor(hex: 0xF6F6F7))
+        fade.isHidden = isStatusOnly
+        notesCard.addSubview(fade)
+
         NSLayoutConstraint.activate([
-            notesCard.heightAnchor.constraint(equalToConstant: isStatusOnly ? 96 : 200),
+            notesCard.heightAnchor.constraint(equalToConstant: isStatusOnly ? 96 : 230),
+            fade.leadingAnchor.constraint(equalTo: notesCard.leadingAnchor, constant: 1),
+            fade.trailingAnchor.constraint(equalTo: notesCard.trailingAnchor, constant: -1),
+            fade.bottomAnchor.constraint(equalTo: notesCard.bottomAnchor, constant: -1),
+            fade.heightAnchor.constraint(equalToConstant: 22),
             notesTitle.leadingAnchor.constraint(equalTo: notesCard.leadingAnchor, constant: 14),
             notesTitle.topAnchor.constraint(equalTo: notesCard.topAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: notesCard.leadingAnchor, constant: 14),
@@ -268,17 +363,25 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
             notesDoc.bottomAnchor.constraint(equalTo: notesBody.bottomAnchor)
         ])
 
-        var secondary: TypefreeUpdateButton?
-        if let secondaryTitle = model.secondaryTitle {
-            secondary = TypefreeUpdateButton(title: secondaryTitle, role: .secondary)
-        }
+        // 下载进度条：一直在布局里（高 4 点），不下载时隐藏，省得状态一变就要重排窗口。
+        let progressBar = NSProgressIndicator()
+        progressBar.identifier = NSUserInterfaceItemIdentifier("typefree.update.progress")
+        progressBar.style = .bar
+        progressBar.isIndeterminate = false
+        progressBar.minValue = 0
+        progressBar.maxValue = 100
+        progressBar.doubleValue = (model.progress ?? 0) * 100
+        progressBar.isHidden = model.progress == nil
+        progressBar.controlSize = .small
+        progressBar.translatesAutoresizingMaskIntoConstraints = false
+
+        // 副按钮常驻（不需要时隐藏）：下载完要从「放到后台」变成「安装并重启 / 稍后」，不重建窗口也能切
+        let secondary = TypefreeUpdateButton(title: model.secondaryTitle ?? "稍后", role: .secondary)
+        secondary.isHidden = model.secondaryTitle == nil
         let primary = TypefreeUpdateButton(title: model.primaryTitle, role: .primary)
         primary.isEnabled = model.primaryEnabled
 
-        [header, title, subtitle, versionPill, notesCard, primary].forEach(root.addSubview)
-        if let secondary {
-            root.addSubview(secondary)
-        }
+        [header, title, subtitle, progressBar, versionPill, notesCard, primary, secondary].forEach(root.addSubview)
 
         NSLayoutConstraint.activate([
             header.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: margin),
@@ -293,8 +396,13 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
             subtitle.trailingAnchor.constraint(equalTo: title.trailingAnchor),
             subtitle.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 7),
 
+            progressBar.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+            progressBar.trailingAnchor.constraint(equalTo: title.trailingAnchor),
+            progressBar.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 10),
+            progressBar.heightAnchor.constraint(equalToConstant: 4),
+
             versionPill.leadingAnchor.constraint(equalTo: title.leadingAnchor),
-            versionPill.topAnchor.constraint(equalTo: subtitle.bottomAnchor, constant: 16),
+            versionPill.topAnchor.constraint(equalTo: progressBar.bottomAnchor, constant: 12),
 
             notesCard.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: margin),
             notesCard.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -margin),
@@ -302,21 +410,17 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
 
             primary.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -margin),
             primary.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -24),
-            primary.widthAnchor.constraint(greaterThanOrEqualToConstant: isStatusOnly ? 96 : 118)
-        ])
+            primary.widthAnchor.constraint(greaterThanOrEqualToConstant: isStatusOnly ? 96 : 118),
 
-        if let secondary {
-            NSLayoutConstraint.activate([
-                secondary.trailingAnchor.constraint(equalTo: primary.leadingAnchor, constant: -10),
-                secondary.centerYAnchor.constraint(equalTo: primary.centerYAnchor),
-                secondary.widthAnchor.constraint(greaterThanOrEqualToConstant: 92)
-            ])
-        }
+            secondary.trailingAnchor.constraint(equalTo: primary.leadingAnchor, constant: -10),
+            secondary.centerYAnchor.constraint(equalTo: primary.centerYAnchor),
+            secondary.widthAnchor.constraint(greaterThanOrEqualToConstant: 92)
+        ])
 
         return root
     }
 
-    private static func label(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
+    static func label(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSTextField {
         let label = NSTextField(labelWithString: text)
         label.font = .systemFont(ofSize: size, weight: weight)
         label.textColor = color
@@ -361,7 +465,7 @@ private final class TypefreeUpdateDialogController: NSWindowController, NSWindow
         return pill
     }
 
-    private static func makeWaveformMark(box: CGFloat, corner: CGFloat) -> NSView {
+    static func makeWaveformMark(box: CGFloat, corner: CGFloat) -> NSView {
         let bars: [(CGFloat, CGFloat, CGFloat, CGFloat, CGFloat)] = [
             (11, 10, 37.2, 25.6, 5), (28, 10, 26, 48, 5), (45, 10, 18, 64, 5),
             (62, 10, 29.2, 41.6, 5), (79, 10, 38.8, 22.4, 5)
@@ -416,6 +520,13 @@ private final class TypefreeUpdateButton: NSButton {
         didSet { applyStyle() }
     }
 
+    /// 就地改按钮文字（applyStyle 会把 title 重新画成 attributedTitle，所以不能只设 title）
+    func setDisplayTitle(_ newTitle: String) {
+        guard title != newTitle else { return }
+        title = newTitle
+        applyStyle()
+    }
+
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         trackingAreas.forEach { removeTrackingArea($0) }
@@ -467,10 +578,167 @@ private final class TypefreeUpdateButton: NSButton {
     }
 }
 
+/// 每天一次的「有可用更新」小提醒窗（Ray 2026-09-22，照 Claude 桌面版那个尺寸）：
+/// 大窗（发现新版本 + 完整更新内容）留给用户主动点「检查更新…」看；主动打断用户的提醒只放一句话和两个按钮。
+/// 「看看改了什么」才打开大窗。锁浅色（弹窗类不跟夜间模式，Ray 的规矩）。
+@MainActor
+private final class TypefreeUpdateReminderController: NSWindowController, NSWindowDelegate {
+    private let onInstall: () -> Void
+    private let onShowDetails: () -> Void
+    private let onClose: () -> Void
+    private var subtitle: NSTextField!
+    private var primary: TypefreeUpdateButton!
+    private var secondary: TypefreeUpdateButton!
+    private var detailsButton: NSButton!
+    private var closeButton: NSButton!
+
+    init(versionText: String, onInstall: @escaping () -> Void, onShowDetails: @escaping () -> Void, onClose: @escaping () -> Void) {
+        self.onInstall = onInstall
+        self.onShowDetails = onShowDetails
+        self.onClose = onClose
+        let window = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 164),
+            styleMask: [.titled, .closable, .fullSizeContentView],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "Typefree 更新"
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        window.isReleasedWhenClosed = false
+        window.hidesOnDeactivate = false
+        window.level = .floating
+        window.backgroundColor = .white
+        window.isMovableByWindowBackground = true
+        [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton].forEach {
+            window.standardWindowButton($0)?.isHidden = true
+        }
+        super.init(window: window)
+        window.delegate = self
+        window.contentView = makeContent(versionText: versionText)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    func show() {
+        guard let window else { return }
+        let screen = NSApp.keyWindow?.screen ?? NSApp.mainWindow?.screen ?? NSScreen.main
+        if let visible = screen?.visibleFrame {
+            let size = window.frame.size
+            window.setFrameOrigin(NSPoint(
+                x: visible.minX + ((visible.width - size.width) / 2).rounded(),
+                y: visible.minY + ((visible.height - size.height) / 2).rounded()
+            ))
+        } else {
+            window.center()
+        }
+        window.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    /// 点了「重启更新」：窗口留着显示状态，按钮全部失效，避免连点。
+    func showInstalling() {
+        subtitle.stringValue = "正在安装并重启…"
+        primary.isEnabled = false
+        secondary.isHidden = true
+        detailsButton.isHidden = true
+        closeButton.isHidden = true
+    }
+
+    func windowWillClose(_ notification: Notification) { onClose() }
+
+    override func cancelOperation(_ sender: Any?) { window?.close() }
+
+    @objc private func installTapped() { onInstall() }
+    @objc private func laterTapped() { window?.close() }
+    @objc private func detailsTapped() {
+        window?.close()
+        onShowDetails()
+    }
+
+    private func makeContent(versionText: String) -> NSView {
+        let root = NSView()
+        root.wantsLayer = true
+        root.layer?.backgroundColor = NSColor(hex: 0xFFFFFF).cgColor
+        let margin: CGFloat = 24
+
+        let logo = TypefreeUpdateDialogController.makeWaveformMark(box: 26, corner: 7)
+        let title = TypefreeUpdateDialogController.label("有可用更新", size: 15, weight: .semibold, color: NSColor(hex: 0x111113))
+
+        closeButton = NSButton()
+        closeButton.isBordered = false
+        closeButton.bezelStyle = .regularSquare
+        closeButton.focusRingType = .none
+        closeButton.image = NSImage(systemSymbolName: "xmark", accessibilityDescription: "关闭")?
+            .withSymbolConfiguration(.init(pointSize: 12, weight: .medium))
+        closeButton.contentTintColor = NSColor(hex: 0x8E8E93)
+        closeButton.imagePosition = .imageOnly
+        closeButton.target = self
+        closeButton.action = #selector(laterTapped)
+        closeButton.translatesAutoresizingMaskIntoConstraints = false
+        closeButton.setAccessibilityLabel("关闭")
+
+        subtitle = TypefreeUpdateDialogController.label("\(versionText) 已在后台下载好，重启即可完成更新。", size: 13, weight: .regular, color: NSColor(hex: 0x686970))
+        subtitle.maximumNumberOfLines = 0
+        subtitle.lineBreakMode = .byWordWrapping
+        subtitle.identifier = NSUserInterfaceItemIdentifier("typefree.update.reminder.subtitle")
+
+        detailsButton = NSButton()
+        detailsButton.isBordered = false
+        detailsButton.bezelStyle = .regularSquare
+        detailsButton.focusRingType = .none
+        detailsButton.attributedTitle = NSAttributedString(string: "看看改了什么", attributes: [
+            .font: NSFont.systemFont(ofSize: 12, weight: .regular),
+            .foregroundColor: NSColor(hex: 0x8E8E93),
+            .underlineStyle: NSUnderlineStyle.single.rawValue
+        ])
+        detailsButton.target = self
+        detailsButton.action = #selector(detailsTapped)
+        detailsButton.translatesAutoresizingMaskIntoConstraints = false
+
+        secondary = TypefreeUpdateButton(title: "稍后", role: .secondary)
+        secondary.target = self
+        secondary.action = #selector(laterTapped)
+        primary = TypefreeUpdateButton(title: "重启更新", role: .primary)
+        primary.target = self
+        primary.action = #selector(installTapped)
+        primary.keyEquivalent = "\r"
+
+        [logo, title, closeButton, subtitle, detailsButton, secondary, primary].forEach(root.addSubview)
+
+        NSLayoutConstraint.activate([
+            logo.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: margin),
+            logo.topAnchor.constraint(equalTo: root.topAnchor, constant: 22),
+            title.leadingAnchor.constraint(equalTo: logo.trailingAnchor, constant: 10),
+            title.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
+
+            closeButton.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -(margin - 6)),
+            closeButton.centerYAnchor.constraint(equalTo: logo.centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 24),
+            closeButton.heightAnchor.constraint(equalToConstant: 24),
+
+            subtitle.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: margin),
+            subtitle.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -margin),
+            subtitle.topAnchor.constraint(equalTo: logo.bottomAnchor, constant: 14),
+
+            primary.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -margin),
+            primary.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -22),
+            primary.widthAnchor.constraint(greaterThanOrEqualToConstant: 104),
+            secondary.trailingAnchor.constraint(equalTo: primary.leadingAnchor, constant: -10),
+            secondary.centerYAnchor.constraint(equalTo: primary.centerYAnchor),
+
+            detailsButton.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: margin - 2),
+            detailsButton.centerYAnchor.constraint(equalTo: primary.centerYAnchor)
+        ])
+        return root
+    }
+}
+
 @MainActor
 private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
     private weak var owner: AppDelegate?
     private var dialogController: TypefreeUpdateDialogController?
+    private var reminderController: TypefreeUpdateReminderController?
     private var userInitiatedCheck = false
     private var presentDetailsWhenReady = false
     private var autoInstallOnReady = false   // 用户主动更新：下载完直接安装重启（省二次点击）
@@ -522,6 +790,7 @@ private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
     }
 
     func presentUpdateDetails() {
+        reminderController?.close()
         guard let info = updateInfo else {
             owner?.checkForUpdates(nil)
             return
@@ -537,27 +806,38 @@ private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
             notes: notesText(for: info),
             notesIsHTML: !isError,
             primaryTitle: primaryButtonTitle(for: info),
-            secondaryTitle: (!info.isDownloading || info.isReadyToInstall) ? "稍后" : nil,
+            secondaryTitle: secondaryButtonTitle(for: info),
             primaryEnabled: true,
-            isError: isError
+            isError: isError,
+            progress: (info.isDownloading && !info.isReadyToInstall) ? info.downloadProgress : nil
         )
+        // ⚠ 闭包里必须读「当下」的状态，不能用建窗口时捕获的 info：窗口不再点一下就关，
+        // 下载完按钮会就地从「放到后台」变成「安装并重启」，用旧快照会按下载中的分支走（Ray 2026-09-18）。
         showDialog(model: model) { [weak self] in
-            guard let self else { return }
-            if info.errorMessage != nil {
+            guard let self, let current = self.updateInfo else { return .close }
+            if current.errorMessage != nil {
                 self.owner?.checkForUpdates(nil)
-            } else if info.isDownloading && !info.isReadyToInstall {
-                return
-            } else if info.infoURL != nil && self.readyInstallReply == nil && self.foundUpdateReply == nil && self.installOnQuitHandler == nil {
-                if let url = info.infoURL { NSWorkspace.shared.open(url) }
-            } else {
-                self.installPendingUpdate()
+                return .close
             }
+            if current.isDownloading && !current.isReadyToInstall {
+                return .close   // 「放到后台」：关掉窗口，onClose 里转成不打扰模式
+            }
+            if current.infoURL != nil && self.readyInstallReply == nil && self.foundUpdateReply == nil && self.installOnQuitHandler == nil {
+                if let url = current.infoURL { NSWorkspace.shared.open(url) }
+                return .close
+            }
+            // 「立即更新」/「安装并重启」：窗口留着，进度和状态就地刷新，用户看得见事情在发生
+            self.dialogController?.lockButtons()
+            self.refreshLiveDialog(installing: current.isReadyToInstall)
+            self.installPendingUpdate()
+            return .keepOpen
         }
     }
 
     func captureInstallOnQuit(for item: SUAppcastItem, handler: @escaping () -> Void) {
         installOnQuitHandler = handler
         updateInfo = makeInfo(from: item, isReady: true, isDownloading: false)
+        startReadyReminder()
     }
 
     func show(_ request: SPUUpdatePermissionRequest, reply: @escaping (SUUpdatePermissionResponse) -> Void) {
@@ -590,14 +870,14 @@ private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
                 reply(.install)
                 presentUpdateDetails()
             } else {
-                // 后台自动发现：静默下载/解包，就绪后只亮 NEW 徽章，等用户主动点。
+                // 后台自动发现：静默下载/解包，就绪后弹一次提醒（见 startReadyReminder），之后每天一次。
                 reply(.install)
             }
         case .downloaded, .installing:
             foundUpdateReply = reply
             updateInfo?.isReadyToInstall = true
             updateInfo?.isDownloading = false
-            if shouldPresentDetails { presentUpdateDetails() }
+            if shouldPresentDetails { presentUpdateDetails() } else { startReadyReminder() }
         @unknown default:
             foundUpdateReply = reply
         }
@@ -642,14 +922,14 @@ private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
                 subtitle: "当前没有可安装的新版本。",
                 versionText: currentVersionText(),
                 notesTitle: "更新状态",
-                notes: "Typefree 会每天自动检查一次；有新版本时，左上角才会显示 NEW。",
+                notes: "Typefree 会每天自动检查一次；有新版本时会先在后台下载好，再提醒你安装。",
                 notesIsHTML: false,
                 primaryTitle: "好",
                 secondaryTitle: nil,
                 primaryEnabled: true,
                 isError: false
             )
-            showDialog(model: model) {}
+            showDialog(model: model) { .close }   // 「好」＝纯关闭
         }
         userInitiatedCheck = false
         presentDetailsWhenReady = false
@@ -734,7 +1014,78 @@ private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
             presentUpdateDetails()
             userInitiatedCheck = false
             presentDetailsWhenReady = false
+            return
         }
+        // 后台静默下载好了：主动提醒一次（每天最多一次），别再只靠主窗口那个小红点。
+        startReadyReminder()
+    }
+
+    // MARK: - 下载就绪后的每日提醒（Ray 2026-09-22）
+    //
+    // 以前后台下载完只在主窗口左上角亮个小红点，不开主窗口的人永远看不到，一直用旧版。
+    // 现在：就绪后立刻弹一次「发现新版本」窗（安装并重启 / 稍后）；点了稍后，之后每天再弹一次，
+    // 直到装上为止。录音或出字过程中不弹（抢焦点会打断用户），过两分钟再试。
+    // 用户自己点「检查更新…」弹出的窗不算提醒，不计时间。
+
+    private static let readyReminderDefaultsKey = "updateReadyReminderLastShown"   // [版本号: 上次提醒时间]
+    private static let readyReminderInterval: TimeInterval = 23 * 3600               // 每天一次；留 1 小时余量给整点定时器
+    private static let readyReminderBusyRetry: TimeInterval = 2 * 60
+    private var readyReminderTimer: Timer?
+    private var readyReminderRetry: DispatchWorkItem?
+
+    private func startReadyReminder() {
+        if readyReminderTimer == nil {
+            let timer = Timer(timeInterval: 3600, repeats: true) { [weak self] _ in
+                self?.presentReadyReminderIfDue()
+            }
+            timer.tolerance = 300
+            RunLoop.main.add(timer, forMode: .common)
+            readyReminderTimer = timer
+        }
+        presentReadyReminderIfDue()
+    }
+
+    private func stopReadyReminder() {
+        readyReminderTimer?.invalidate()
+        readyReminderTimer = nil
+        readyReminderRetry?.cancel()
+        readyReminderRetry = nil
+    }
+
+    private func presentReadyReminderIfDue() {
+        readyReminderRetry?.cancel()
+        readyReminderRetry = nil
+        guard let info = updateInfo, info.isReadyToInstall, info.errorMessage == nil else { return }
+        guard dialogController == nil, reminderController == nil else { return }   // 窗已经开着（比如用户自己点开的），不重复弹
+
+        let key = info.buildVersion.isEmpty ? info.displayVersion : info.buildVersion
+        let shown = UserDefaults.standard.dictionary(forKey: Self.readyReminderDefaultsKey) as? [String: Date] ?? [:]
+        if let last = shown[key], Date().timeIntervalSince(last) < Self.readyReminderInterval { return }
+
+        if owner?.isBusyForUpdateReminder() == true {
+            let retry = DispatchWorkItem { [weak self] in self?.presentReadyReminderIfDue() }
+            readyReminderRetry = retry
+            DispatchQueue.main.asyncAfter(deadline: .now() + Self.readyReminderBusyRetry, execute: retry)
+            return
+        }
+
+        UserDefaults.standard.set([key: Date()], forKey: Self.readyReminderDefaultsKey)   // 只留当前版本，旧版本的记录顺手清掉
+        presentReadyReminder(versionText: info.displayVersion.isEmpty ? "新版本" : "Typefree \(info.displayVersion)")
+    }
+
+    private func presentReadyReminder(versionText: String) {
+        let controller = TypefreeUpdateReminderController(
+            versionText: versionText,
+            onInstall: { [weak self] in
+                guard let self else { return }
+                self.reminderController?.showInstalling()
+                self.installPendingUpdate()
+            },
+            onShowDetails: { [weak self] in self?.presentUpdateDetails() },
+            onClose: { [weak self] in self?.reminderController = nil }
+        )
+        reminderController = controller
+        controller.show()
     }
 
     /// 实时刷新当前对话框副标题（下载中显示百分比，解包/安装显示对应状态）。对话框没开则无操作。
@@ -753,15 +1104,23 @@ private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
         } else {
             text = updateSummary(for: info)
         }
-        controller.applyLiveState(subtitle: text)
+        let downloading = info.isDownloading && !info.isReadyToInstall && !installing && !extracting
+        controller.applyLiveState(
+            subtitle: text,
+            progress: downloading ? info.downloadProgress : nil,
+            primaryTitle: (installing || extracting) ? "安装并重启" : primaryButtonTitle(for: info),
+            secondaryTitle: (installing || extracting) ? nil : secondaryButtonTitle(for: info)
+        )
     }
 
     func showInstallingUpdate(withApplicationTerminated applicationTerminated: Bool, retryTerminatingApplication: @escaping () -> Void) {
+        stopReadyReminder()
         updateInfo?.isReadyToInstall = false
         updateInfo?.isDownloading = false
     }
 
     func showUpdateInstalledAndRelaunched(_ relaunched: Bool, acknowledgement: @escaping () -> Void) {
+        stopReadyReminder()
         acknowledgement()
         updateInfo = nil
     }
@@ -802,17 +1161,24 @@ private final class TypefreeUpdateUserDriver: NSObject, SPUUserDriver {
         return "发现版本 \(info.displayVersion)。"
     }
 
+    /// 按钮上写"要发生什么"，不写状态（Ray 2026-09-18：下载中时主按钮写着「稍后」，点了等于取消自动安装，
+    /// 但窗口一关什么反馈都没有，用户以为已经更新好了）。状态归副标题和进度条管。
     private func primaryButtonTitle(for info: TypefreeUpdateInfo) -> String {
         if info.errorMessage != nil { return "重新检查" }
         if info.infoURL != nil && readyInstallReply == nil && foundUpdateReply == nil && installOnQuitHandler == nil {
             return "查看详情"
         }
-        if info.isDownloading && !info.isReadyToInstall { return "稍后" }
-        return info.isReadyToInstall ? "安装并重启" : "后台下载中"
+        if info.isReadyToInstall { return "安装并重启" }
+        return info.isDownloading ? "放到后台" : "立即更新"
+    }
+
+    /// 下载中只留「放到后台」一个按钮（再给个「稍后」没意义）；其余状态都配「稍后」。
+    private func secondaryButtonTitle(for info: TypefreeUpdateInfo) -> String? {
+        (info.isDownloading && !info.isReadyToInstall) ? nil : "稍后"
     }
 
     private func showDialog(model: TypefreeUpdateDialogModel,
-                            onPrimary: @escaping () -> Void,
+                            onPrimary: @escaping () -> TypefreeUpdateDialogController.PrimaryOutcome,
                             onSecondary: @escaping () -> Void = {}) {
         dialogController?.close()
         let controller = TypefreeUpdateDialogController(
@@ -938,10 +1304,51 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         }
     }
 
-    private var isRecording = false
+    private var isRecording = false {
+        didSet {
+            guard oldValue != isRecording else { return }
+            updateEscapeInterceptor()
+        }
+    }
+    private lazy var escapeInterceptor: EscapeInterceptor = {
+        let interceptor = EscapeInterceptor()
+        interceptor.debugLog = { [weak self] msg in self?.debugLog(msg) }
+        interceptor.onEscape = { [weak self] in
+            guard let self else { return }
+            if self.isRecording { self.cancelRecording() } else { self.cancelProcessing() }
+        }
+        return interceptor
+    }()
+    /// 工单 #1019：录音期间 Esc 取消；工单 #1024：识别 / 整理中（文字还没打出来）也能按 Esc 取消。按键都不传给前台 App。
+    private var escapeInterceptorWanted = false
+    private func updateEscapeInterceptor() {
+        let wanted = isRecording || processingSamples != nil
+        guard wanted != escapeInterceptorWanted else { return }
+        escapeInterceptorWanted = wanted
+        if wanted { escapeInterceptor.activate() } else { escapeInterceptor.deactivate() }
+    }
     private var isProcessing = false
     // 本地改动：本次送去识别的录音时长（毫秒，16kHz 样本数换算），交付时记进日统计，首页「洞察」用
     private var pendingRecordingDurationMs = 0
+    /// 正在识别 / 整理的这段录音（听写才有；问 AI 不走这里）。非 nil 期间按 Esc 可取消，出字或报错后清空。
+    private var processingSamples: [Float]? {
+        didSet { updateEscapeInterceptor() }
+    }
+    private var processingStartedAt = Date()
+    /// 每开始处理一段录音 +1；取消 / 放弃时也 +1，晚到的边录边发结果对不上号就丢掉
+    private var processingGeneration = 0
+    /// 识别阶段的总等待封顶（工单 #1024：网络卡住时以前每步干等一分钟、叠加重试近 3 分钟）
+    private var recognitionWatchdog: DispatchWorkItem?
+    /// 这次边录边发的会话：等太久放弃时，先把已识别出的前半段交给用户
+    private var processingSession: StreamingTranscriptionSession?
+    /// 只识别出了前半段：出字后提醒一次（后半截以前会悄悄丢掉）
+    private var pendingPartialHint: String?
+    private static let partialResultHint = "后半段没识别出来 · 整段录音在历史里，可点「···」→「重试」"
+    /// 这次录音放过开始提示音没有：结束音只跟在开始音后面放（长按问 AI 没判出开口时两个都不放）
+    private var didPlayStartCue = false
+
+    /// 更新提醒弹窗要不要缓一缓：录音或出字过程中弹窗会抢焦点、打断用户。
+    func isBusyForUpdateReminder() -> Bool { isRecording || isProcessing }
     private let debugLogQueue = DispatchQueue(label: "com.voicepolish.debug-log", qos: .utility)
     private let debugLogMaxBytes: UInt64 = 2 * 1024 * 1024
     private let debugLogPrivacyMigrationKey = "debugLogPrivacyMigrationV1"
@@ -961,6 +1368,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
     private var pendingPolishWarning: String?  // 润色失败原因（额度用尽等），在文字投递后提醒一次
     private var pendingOverlayHide: DispatchWorkItem?  // 防止上一次错误的延时隐藏误杀新录音浮窗
     private var cancelledSamples: [Float]?  // 误点叉号的录音暂存（撤销窗口期内可重新识别）
+    /// 暂存的这段是不是「问 AI」的录音：撤销时要重新去问 AI，而不是当普通文字打出来
+    private var cancelledWasAsk = false
     private var cancelledSamplesTimer: Timer?  // 撤销窗口到期后清暂存，不让大段音频常驻内存
     private var processingMode: ProcessingMode = {
         ProcessingMode.migrateUserDefaultsIfNeeded()
@@ -1046,6 +1455,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         removeLegacyPlaintextDebugLogIfNeeded()
         resetOverlayStyleToMonoOnce()
         debugLog("App launched")
+        CuePlayer.shared.preload()   // 提示音启动时合成好，第一次录音不卡
+
+        // 配置存不下来时（文件夹权限不对、文件损坏）要在日志里留痕，否则用户只看到「每次都要重新设置」。
+        VoicePolishConfig.shared.debugLog = { [weak self] msg in self?.debugLog(msg) }
 
         // 启动早期：把明文 config 残留的 API key 收敛进钥匙串（幂等、fail-closed）。
         VoicePolishConfig.shared.reconcileSecrets()
@@ -1062,6 +1475,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         // （之前只能靠右键菜单粘贴）。
         setupMainMenu()
 
+        // 握手时告诉服务器「这台填了自己的 Key」，运营后台才分得清自带 Key 与试用用户（只是个布尔值）
+        TrialManager.ownKeyConfiguredProvider = { [weak self] in self?.cloudTranscriber.isConfigured() ?? false }
+
         // 本地改动：自编译魔改版不启动 Sparkle，避免被官方版自动覆盖；跟进上游走 git merge upstream/main
         debugLog("Sparkle updater disabled (local build)")
 
@@ -1073,7 +1489,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         // 授权联网复核：退款/被找回页重置的设备，几天内自动退出激活（没网照常用）
         LicenseManager.shared.startRevalidation(appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String)
 
-        // 自动学习（风格画像；从成稿挖词默认停用）：启动后在后台低优先级跑一次，之后随投递节流触发
+        // 自动学习调度（从成稿挖词、风格画像，两者现在都默认停用，见 AutoLearnScheduler.run）：启动后在后台低优先级跑一次，之后随投递节流触发
         AutoLearnScheduler.shared.debugLog = { [weak self] msg in self?.debugLog(msg) }
         AutoLearnScheduler.shared.scheduleLaunchRun()
         // 纠错学习：启动时整理一次候选（过期的、不像听错的清掉）
@@ -1223,6 +1639,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             HotWordsAutoLearner.shared.stopMonitoring()
         }
         isRecording = true
+        clearHintQueue()
         debugLog("START recording")
         statusBar.setTitle("VP●")
 
@@ -1250,6 +1667,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             showError("录音启动失败: \(errorMsg)")
             return false
         }
+        // 工单 #1003：真正开始收音这一刻放开始音，用户听到就知道可以说了（也顺带缓解 #1008「说太快丢开头」）。
+        // 结束和取消都响结束音。长按问 AI 在判出开口前可能是误触，两个都不出声。
+        didPlayStartCue = !askAwaitingSpeech && CuePlayer.shared.isEnabled
+        if didPlayStartCue { CuePlayer.shared.play(.start); debugLog("Cue: start（\(CuePlayer.shared.style.rawValue)）") }
         // 托管通道录音封顶（owner 出识别费，防开着不动烧钱）：试用 5 分钟；会员 9 分 50 秒——服务器单条上限 10 分钟，
         // 编码会多出零点几秒，留点余量免得整段被拒。到点正常停下并转写已录内容。
         let hostedRoute = HostedRoute.current(ownKeyConfigured: cloudTranscriber.isConfigured())
@@ -1299,6 +1720,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             debugLog("STOP ignored: not recording")
             return
         }
+        if didPlayStartCue {
+            didPlayStartCue = false
+            CuePlayer.shared.play(.stop)
+            debugLog("Cue: stop")
+        }
         if voiceQuestionMode {
             stopRecordingAndAsk()
             return
@@ -1333,6 +1759,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             let recordingMs = samples.count * 1000 / 16000
             DispatchQueue.main.async { self.pendingRecordingDurationMs = recordingMs }
 
+            DispatchQueue.main.async {
+                let generation = self.beginProcessing(samples: samples)
+                self.processingSession = session
+                DispatchQueue.global(qos: .userInitiated).async {
+                    self.runProcessing(samples: samples, session: session, mode: mode, generation: generation)
+                }
+            }
+        }
+    }
+
+    /// 松手后的识别 + 整理。generation 对不上（期间按 Esc 取消了 / 等太久放弃了）就不再往下走。
+    private func runProcessing(samples: [Float], session: StreamingTranscriptionSession?, mode: ProcessingMode, generation: Int) {
             guard let session = session else {
                 self.pipeline.process(samples: samples, mode: mode)  // omni / 未启用流式：原路径
                 return
@@ -1344,17 +1782,103 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             session.finish(finalSamples: samples) { [weak self] result in
                 guard let self = self else { return }
                 DispatchQueue.main.async {
+                    guard generation == self.processingGeneration else {
+                        self.debugLog("Streaming result dropped (cancelled)")
+                        return
+                    }
                     switch result {
                     case .success(let rawText):
                         self.debugLog("Streaming finish success (\(rawText.count) chars)")
                         self.pipeline.processTranscribedText(rawText, samples: samples, mode: mode)
+                    case .failure(let error as StreamingTranscriptionSession.PartialResultError):
+                        // 尾巴两次没识别出来：前半段照常出字，并提醒后半段没出来（整段录音随这条记录进历史，可重试）
+                        self.debugLog("Streaming tail failed: \(error.underlying) — delivering first part (\(error.text.count) chars)")
+                        self.pendingPartialHint = Self.partialResultHint
+                        self.pipeline.processTranscribedText(error.text, samples: samples, mode: mode)
                     case .failure(let error):
                         self.debugLog("Streaming finish failed: \(error) — fallback to batch")
                         self.pipeline.process(samples: samples, mode: mode)
                     }
                 }
             }
+    }
+
+    /// 开始处理一段录音（主线程）：记下录音供 Esc 取消 / 放弃时留进历史，并开识别阶段的总等待封顶。
+    private func beginProcessing(samples: [Float]) -> Int {
+        processingGeneration += 1
+        processingSamples = samples
+        processingStartedAt = Date()
+        startRecognitionWatchdog(audioSeconds: Double(samples.count) / 16000.0)
+        return processingGeneration
+    }
+
+    /// 出字 / 报错 / 没内容 / 取消：这段录音处理完了
+    private func endProcessing() {
+        recognitionWatchdog?.cancel()
+        recognitionWatchdog = nil
+        processingSamples = nil
+        processingSession = nil
+    }
+
+    /// 识别阶段最多等多久：正常一两秒就出字；网络卡住时到点直接放弃，不再陪着一轮轮重试干等。
+    static func recognitionWaitCap(audioSeconds: Double) -> TimeInterval {
+        min(240, 25 + audioSeconds * 0.4)
+    }
+
+    private func startRecognitionWatchdog(audioSeconds: Double) {
+        recognitionWatchdog?.cancel()
+        let cap = Self.recognitionWaitCap(audioSeconds: audioSeconds)
+        let generation = processingGeneration
+        let work = DispatchWorkItem { [weak self] in
+            guard let self, generation == self.processingGeneration, let samples = self.processingSamples else { return }
+            self.debugLog("Recognition gave up after \(Int(cap))s (audio \(String(format: "%.1f", audioSeconds))s)")
+            self.pipeline.cancelCurrent()
+            self.processingGeneration += 1
+            // 边录边发已识别出前半段：先把这部分交给用户（照常整理、出字），并提醒后半段没出来
+            if let partial = self.processingSession?.committedText, !partial.isEmpty {
+                self.debugLog("Delivering first part (\(partial.count) chars) after giving up")
+                self.processingSession = nil
+                self.recognitionWatchdog = nil
+                self.pendingPartialHint = Self.partialResultHint
+                self.pipeline.processTranscribedText(partial, samples: samples, mode: self.processingMode)
+                return
+            }
+            let kept = self.pipeline.preserveFailedRecording(samples: samples, startedAt: self.processingStartedAt)
+            self.endProcessing()
+            self.isProcessing = false
+            self.statusBar.setTitle("VP")
+            self.showError(kept ? "网络太慢，这段没识别出来 · 录音已存进历史，可点「···」→「重试」"
+                                : "网络太慢，这段没识别出来，请再说一次")
         }
+        recognitionWatchdog = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + cap, execute: work)
+    }
+
+    /// 识别 / 整理中按 Esc：放弃这次（晚到的结果不会再打字），和录音中取消一样给 5 秒「撤销」。
+    private func cancelProcessing() {
+        guard isProcessing, let samples = processingSamples else {
+            debugLog("CANCEL processing ignored: nothing in progress")
+            return
+        }
+        debugLog("CANCEL processing (Esc), elapsed \(String(format: "%.1f", Date().timeIntervalSince(processingStartedAt)))s")
+        pipeline.cancelCurrent()
+        processingGeneration += 1
+        endProcessing()
+        pendingPolishWarning = nil
+        pendingOutputLanguageHint = nil
+        pendingPartialHint = nil
+        pendingOverlayHide?.cancel()
+        pendingOverlayHide = nil
+        isProcessing = false
+        statusBar.setTitle("VP")
+        overlayWindow.hide()
+        cancelledSamples = samples
+        cancelledWasAsk = false
+        cancelledSamplesTimer?.invalidate()
+        cancelledSamplesTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
+            self?.cancelledSamples = nil
+        }
+        overlayWindow.showCancelledCapsule()
     }
 
     /// 「长按问 AI」松手：只识别，不润色不粘贴，把识别出的问题交给 AI，答案弹在按下点附近。
@@ -1388,63 +1912,119 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         isProcessing = true
         statusBar.setTitle("VP⏳")
         if followUp { answerPanel.setListening(.processing) } else { overlayWindow.show(state: .processing(message: "→ AI")) }
+        audioRecorder.stopRecording { [weak self] samples in
+            DispatchQueue.main.async {
+                self?.askAI(with: samples, followUp: followUp, speechUnconfirmed: speechUnconfirmed)
+            }
+        }
+    }
+
+    /// 拿到录音后识别出问题、交给 AI，答案弹在面板里。松手提问和「撤销取消」共用这一段——
+    /// 以前撤销走的是普通听写，取消的问题会被当成文字打进当前窗口（2026-09-23 发版前自查）。
+    private func askAI(with samples: [Float]?, followUp: Bool, speechUnconfirmed: Bool) {
         let noSpeech: () -> Void = { [weak self] in
             guard let self else { return }
             self.finishAsk()
             if speechUnconfirmed { return }
             if followUp { self.answerPanel.setListening(.noSpeech) } else { self.overlayWindow.showHint("没听到问题", accent: .neutral) }
         }
-        audioRecorder.stopRecording { [weak self] samples in
+        guard let samples, samples.count > 16000 / 2 else { noSpeech(); return }
+        self.cloudTranscriber.transcribe(samples: samples) { [weak self] result in
             guard let self else { return }
-            guard let samples, samples.count > 16000 / 2 else {
-                DispatchQueue.main.async { noSpeech() }
-                return
-            }
-            self.cloudTranscriber.transcribe(samples: samples) { [weak self] result in
-                guard let self else { return }
-                DispatchQueue.main.async {
-                    switch result {
-                    case .success(let raw):
-                        let question = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-                            .trimmingCharacters(in: CharacterSet(charactersIn: "。．.，,！!？?；;"))
-                        guard !question.isEmpty else { noSpeech(); return }
-                        self.debugLog("ASK question chars=\(question.count) followUp=\(followUp)")
-                        self.overlayWindow.hide()
-                        self.answerPanel.setListening(.idle)
-                        let history = followUp ? self.answerPanel.history : []
-                        if followUp, self.answerPanel.isVisible { self.answerPanel.appendQuestion(question) } else { self.answerPanel.startThread(question: question) }
-                        let askStarted = Date()
-                        let thread = self.answerPanel.threadID
-                        self.aiPolisher.answer(question: question, history: history, onPartial: { [weak self] partial in
-                            self?.answerPanel.updatePartial(partial)
-                        }) { [weak self] result in
-                            DispatchQueue.main.async {
-                                guard let self else { return }
-                                self.finishAsk()
-                                switch result {
-                                case .success(let answer):
-                                    self.debugLog("ASK answered chars=\(answer.count)")
-                                    self.answerPanel.finish(answer: answer)
-                                    self.aiPolisher.writeAskLog(question: question, answer: answer, thread: thread,
-                                                                durationMs: Int(Date().timeIntervalSince(askStarted) * 1000))
-                                case .failure(let err):
-                                    let reason = (err as? LocalizedError)?.errorDescription ?? "\(err)"
-                                    self.debugLog("ASK failed: \(reason)")
-                                    self.answerPanel.fail("回答失败：\(reason)")
-                                }
+            DispatchQueue.main.async {
+                switch result {
+                case .success(let raw):
+                    let question = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+                        .trimmingCharacters(in: CharacterSet(charactersIn: "。．.，,！!？?；;"))
+                    guard !question.isEmpty else { noSpeech(); return }
+                    self.debugLog("ASK question chars=\(question.count) followUp=\(followUp)")
+                    self.overlayWindow.hide()
+                    self.answerPanel.setListening(.idle)
+                    let history = followUp ? self.answerPanel.history : []
+                    if followUp, self.answerPanel.isVisible { self.answerPanel.appendQuestion(question) } else { self.answerPanel.startThread(question: question) }
+                    let askStarted = Date()
+                    let thread = self.answerPanel.threadID
+                    self.aiPolisher.answer(question: question, history: history, onPartial: { [weak self] partial in
+                        self?.answerPanel.updatePartial(partial)
+                    }) { [weak self] result in
+                        DispatchQueue.main.async {
+                            guard let self else { return }
+                            self.finishAsk()
+                            switch result {
+                            case .success(let answer):
+                                self.debugLog("ASK answered chars=\(answer.count)")
+                                self.answerPanel.finish(answer: answer)
+                                self.aiPolisher.writeAskLog(question: question, answer: answer, thread: thread,
+                                                            durationMs: Int(Date().timeIntervalSince(askStarted) * 1000))
+                            case .failure(let err):
+                                let reason = (err as? LocalizedError)?.errorDescription ?? "\(err)"
+                                self.debugLog("ASK failed: \(reason)")
+                                self.answerPanel.fail("回答失败：\(reason)")
                             }
                         }
-                    case .failure(let err):
-                        // 没听到有效语音：安静地提示一次，不走红框 + 文字条的两段式报错
-                        if case CloudASRTranscriber.TranscriptionError.noSpeech = err { noSpeech(); return }
-                        self.finishAsk()
-                        self.answerPanel.setListening(.idle)
-                        let message = (err as? LocalizedError)?.errorDescription ?? "识别失败"
-                        self.showError(message)
                     }
+                case .failure(let err):
+                    // 没听到有效语音：安静地提示一次，不走红框 + 文字条的两段式报错
+                    if case CloudASRTranscriber.TranscriptionError.noSpeech = err { noSpeech(); return }
+                    self.finishAsk()
+                    self.answerPanel.setListening(.idle)
+                    let message = (err as? LocalizedError)?.errorDescription ?? "识别失败"
+                    self.showError(message)
                 }
             }
         }
+    }
+
+    // MARK: - 出字后的提示排队（2026-09-23 发版前自查）
+    //
+    // 出字后可能接连冒出好几条提示：「按英文输出」口令、「没粘上，按 ⌘V」、「润色失败」。
+    // 提示胶囊同一时刻只有一条、新的顶掉旧的，以前「按 ⌘V」那条（最要紧：不按文字就丢了）
+    // 零点几秒后就被别的提示盖掉。现在排队依次显示：每条至少停 2.5 秒，「按 ⌘V」插队到最前、至少停 4.5 秒。
+    // 开始新的录音时清空队列，不让旧提示压在录音胶囊上。
+
+    private struct QueuedHint {
+        let text: String
+        let accent: OverlayWindow.CapsuleAccent
+        let urgent: Bool
+    }
+    private var hintQueue: [QueuedHint] = []
+    private var hintBusyUntil = Date.distantPast
+    private var hintPump: DispatchWorkItem?
+
+    private func queueHint(_ text: String, accent: OverlayWindow.CapsuleAccent = .warning, urgent: Bool = false) {
+        guard !isRecording else { return }   // 用户已经开始下一句：旧提示不再相关
+        let hint = QueuedHint(text: text, accent: accent, urgent: urgent)
+        if urgent, let i = hintQueue.firstIndex(where: { !$0.urgent }) {
+            hintQueue.insert(hint, at: i)
+        } else {
+            hintQueue.append(hint)
+        }
+        pumpHints()
+    }
+
+    private func pumpHints() {
+        hintPump?.cancel()
+        hintPump = nil
+        guard !hintQueue.isEmpty else { return }
+        if isRecording { clearHintQueue(); return }
+        let wait = hintBusyUntil.timeIntervalSinceNow
+        if wait > 0 {
+            let work = DispatchWorkItem { [weak self] in self?.pumpHints() }
+            hintPump = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + wait, execute: work)
+            return
+        }
+        let hint = hintQueue.removeFirst()
+        overlayWindow.showHint(hint.text, accent: hint.accent)
+        hintBusyUntil = Date().addingTimeInterval(hint.urgent ? 4.5 : 2.5)
+        pumpHints()
+    }
+
+    private func clearHintQueue() {
+        hintQueue.removeAll()
+        hintPump?.cancel()
+        hintPump = nil
+        hintBusyUntil = .distantPast
     }
 
     private func finishAsk() {
@@ -1491,6 +2071,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
 
     private func cancelRecording() {
         debugLog("CANCEL recording called, isRecording=\(isRecording), isProcessing=\(isProcessing)")
+        // 长按问 AI 还没判出开口（用户什么都还没看到，也可能只是误触）：静悄悄丢掉，不冒「已取消 · 撤销」
+        if isRecording, voiceQuestionMode, askAwaitingSpeech {
+            discardAskRecording()
+            return
+        }
+        let wasAsk = voiceQuestionMode
         askAwaitingSpeech = false
         voiceQuestionMode = false
         let wasFollowUp = voiceQuestionFollowUp
@@ -1499,6 +2085,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         guard isRecording else {
             debugLog("CANCEL ignored: not recording")
             return
+        }
+        // 取消也响结束音（Ray 2026-09-23：按下有声、取消没声不对称）；只跟在开始音后面放
+        if didPlayStartCue {
+            didPlayStartCue = false
+            CuePlayer.shared.play(.stop)
+            debugLog("Cue: stop（取消）")
         }
 
         trialMaxRecordingTimer?.invalidate()
@@ -1522,6 +2114,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                 // 面板续聊取消：不给「撤销」（撤销走的是润色粘贴，不是提问），面板底栏轻提示一下
                 if wasFollowUp { self.answerPanel.setListening(.cancelled); return }
                 self.cancelledSamples = samples
+                self.cancelledWasAsk = wasAsk
                 self.cancelledSamplesTimer?.invalidate()
                 self.cancelledSamplesTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: false) { [weak self] _ in
                     self?.cancelledSamples = nil
@@ -1537,11 +2130,20 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         cancelledSamples = nil
         cancelledSamplesTimer?.invalidate()
         cancelledSamplesTimer = nil
-        debugLog("UNDO cancel: re-processing \(samples.count) samples")
+        let wasAsk = cancelledWasAsk
+        cancelledWasAsk = false
+        debugLog("UNDO cancel: re-processing \(samples.count) samples as \(wasAsk ? "ask" : "dictation")")
         isProcessing = true
         statusBar.setTitle("VP⏳")
-        pendingRecordingDurationMs = samples.count * 1000 / 16000   // 本地改动：撤销重识别也记录音时长
-        pipeline.process(samples: samples, mode: processingMode)
+        if wasAsk {
+            // 取消的是问 AI：撤销 = 重新把这个问题交给 AI（答案仍弹在当初按下的位置附近）
+            overlayWindow.show(state: .processing(message: "→ AI"))
+            askAI(with: samples, followUp: false, speechUnconfirmed: false)
+        } else {
+            pendingRecordingDurationMs = samples.count * 1000 / 16000   // 本地改动：撤销重识别也记录音时长
+            _ = beginProcessing(samples: samples)
+            pipeline.process(samples: samples, mode: processingMode)
+        }
     }
 
     /// 启动时把旧的明文历史文字/音频收敛成密文；失败时保留原文件，下次启动再试。
@@ -1658,6 +2260,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             return text
         case .copiedOnlyNeedsAccessibility:
             return text + "\n(已复制到剪贴板；授予辅助功能权限后可自动粘贴)"
+        case .pastedKeptClipboard:
+            return text
         }
     }
 
@@ -1944,6 +2548,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         manager.onAbortAsk = { [weak self] in self?.discardAskRecording() }
         // 新手势演示盖在设置窗上时，「试一试」输入框要能按住说话：只对那个窗口放行
         manager.guideWindowNumber = { SettingsWindowController.shared?.guideWindowNumber }
+        // 设置窗里的输入框（工单对话框等）也能按住说话（Ray 2026-09-18：工单里没法长按输入）
+        manager.dictationWindowNumber = { SettingsWindowController.shared?.dictationWindowNumber }
         manager.capsuleCenterProvider = { [weak self] in self?.overlayWindow.capsuleCenterOnScreen }
         manager.capsuleFrameProvider = { [weak self] in self?.overlayWindow.capsuleFrameOnScreen }
         manager.onHoldGestureUpdate = { [weak self] gesture in
@@ -2004,6 +2610,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         SettingsWindowController.show(delegate: self, initialPage: .model)
     }
 
+    /// 菜单栏「个人词库…」直达词库页（工单 #17）
+    func showVocabularySettings() {
+        SettingsWindowController.show(delegate: self, initialPage: .vocabulary)
+    }
+
     // MARK: - First-run Onboarding
 
     private var onboardingController: OnboardingWindowController?
@@ -2050,6 +2661,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
 
     // MARK: - Manual Correction & Learning Feedback
 
+    /// 菜单栏「复制最后一句」：把上一次出的文字重新放回剪贴板。
+    /// 工单 #1016 的兜底——焦点判不出来（微信、网页这类读不到结构的 App 我们一律不下结论）、
+    /// 或者用户没留意那条胶囊提示时，随时能把刚才说的话捞回来，不用重说一遍。
+    func copyLastDeliveredText() {
+        guard let lastText = lastDeliveredText, !lastText.isEmpty else {
+            showError("还没有可复制的内容")
+            return
+        }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(lastText, forType: .string)
+        debugLog("菜单栏：复制最后一句 chars=\(lastText.count)")
+        overlayWindow.showHint("已复制最后一句 · 按 ⌘V 粘贴", accent: .success)
+    }
+
     func showManualCorrection() {
         guard let lastText = lastDeliveredText, !lastText.isEmpty else {
             showError("没有可纠正的内容")
@@ -2092,7 +2718,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
         learner.debugLog = { [weak self] msg in self?.debugLog(msg) }
         let learned = learner.learnFromManualCorrection(original: lastText, corrected: corrected)
         if learned.isEmpty {
-            showError("未检测到可学习的术语差异")
+            // 只有改对的是专有名词（人名、品牌、术语）才进词库；常用词识别本来就认得，不用加
+            overlayWindow.showHint("没有需要加进词库的新词", accent: .neutral)
         } else {
             showLearningFeedback(learned)
         }
@@ -2111,8 +2738,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
             self.lastLearnedDescriptions = []
             let learner = HotWordsAutoLearner.shared
             learner.debugLog = { [weak self] msg in self?.debugLog(msg) }
-            learner.undoLearnedCorrections(toUndo)
-            self.debugLog("User undid learned corrections: count=\(toUndo.count)")
+            learner.undoLearnedWords(toUndo)
+            self.debugLog("User undid learned words: count=\(toUndo.count)")
         }
 
         let displayText = descriptions.joined(separator: "、")
@@ -2167,15 +2794,24 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
 
     private func handlePipelineState(_ state: VoicePolishPipeline.State) {
         DispatchQueue.main.async {
+            // 已取消 / 已放弃（刚好和结果擦肩而过）：不再显示、不打字
+            guard self.isProcessing else {
+                self.debugLog("Pipeline state ignored: not processing")
+                return
+            }
             switch state {
             case .transcribing(let message):
                 self.overlayWindow.show(state: .processing(message: message))
 
             case .polishing(let message):
+                // 识别完成：总等待封顶只管识别，整理慢了会退回原文（润色失败照常出字）
+                self.recognitionWatchdog?.cancel()
+                self.recognitionWatchdog = nil
                 self.overlayWindow.show(state: .processing(message: message))
 
             case .done(let text):
                 self.debugLog("Pipeline done received on main chars=\(text.count)")
+                self.endProcessing()
                 self.isProcessing = false
                 self.statusBar.setTitle("VP")
                 let frontmostAppName = self.currentFrontmostAppName()
@@ -2191,11 +2827,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                 self.overlayWindow.completeProgressOnly {
                     self.overlayWindow.hide()
                 }
-                let result = self.textDelivery.deliver(text: deliveredText)
+                let result = self.textDelivery.deliver(text: deliveredText, onNotLanded: { [weak self] in
+                    // 工单 #1016 第二轮：网页正文上说完话，粘完核实焦点没进输入框 → 文字多半没粘上，剪贴板留着
+                    self?.debugLog("TextDelivery: 网页里多半没粘上，提示用户 ⌘V")
+                    self?.queueHint("文字可能没粘上 · 已复制，按 ⌘V 粘贴", urgent: true)
+                })
                 if let hint = self.pendingOutputLanguageHint {
                     self.pendingOutputLanguageHint = nil
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
-                        self?.overlayWindow.showHint(hint, accent: .success)
+                        self?.queueHint(hint, accent: .success)
                     }
                 }
                 switch result {
@@ -2203,6 +2843,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                     self.debugLog("TextDelivery: deliver returned pasted")
                 case .copiedOnlyNeedsAccessibility:
                     self.debugLog("TextDelivery: deliver returned copiedOnlyNeedsAccessibility")
+                case .pastedKeptClipboard:
+                    // 工单 #1016：焦点不在输入框时，文字以前会凭空消失（粘不进去 + 剪贴板被还原）。
+                    // 现在剪贴板留着这段文字，明确告诉用户按 ⌘V。走提示队列插队显示，不会被口令 / 润色失败提示盖掉。
+                    self.debugLog("TextDelivery: deliver returned pastedKeptClipboard（焦点不在输入框）")
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { [weak self] in
+                        self?.queueHint("刚才的位置不能输入文字 · 已复制，按 ⌘V 粘贴", urgent: true)
+                    }
                 }
                 // quotaCharCount 只剩统计用途（每周字数限制已在 2026-09-14 取消）：仍按「未赞助 + 自带 Key」口径记，
                 // 保持 input_stats.json 老字段兼容。
@@ -2218,12 +2865,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                                          countsTowardFreeQuota: countsTowardQuota)
                 AutoLearnScheduler.shared.noteRecordDelivered()
 
+                if let hint = self.pendingPartialHint {
+                    self.pendingPartialHint = nil
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { self.queueHint(hint) }
+                }
+
                 // 润色失败（额度用尽/欠费等）：文字已照常输出，但明确提醒一次，别让额度耗尽被静默跳过。
                 if let warning = self.pendingPolishWarning {
                     self.pendingPolishWarning = nil
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) {
                         let tip = warning.contains("额度") && !LicenseManager.shared.hasActiveMembership() ? " · 开通会员或填自己的 Key 不限量" : ""
-                        self.overlayWindow.showHint("已输出未润色文字（润色失败：\(warning)）\(tip)")
+                        self.queueHint("已输出未润色文字（润色失败：\(warning)）\(tip)")
                     }
                 }
 
@@ -2242,11 +2894,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                 }
 
             case .error(let message):
+                self.pendingPartialHint = nil
+                self.endProcessing()
                 self.isProcessing = false
                 self.statusBar.setTitle("VP")
                 self.showError(message)
 
             case .empty:
+                self.pendingPartialHint = nil
+                self.endProcessing()
                 self.recordEmptyResult()
             }
         }
@@ -2771,4 +3427,50 @@ private final class ClosureButton: NSButton {
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
     @objc private func fire() { handler() }
+}
+
+/// 录音开始 / 结束提示音（工单 #1003）。声音由 VoicePolishCore.CueSound 现场合成，启动时预载，播放无延迟。
+/// 开关与音色存在 config.json（默认开）；设置 →「音频」里可关。
+final class CuePlayer {
+    static let shared = CuePlayer()
+
+    static let enabledKey = "cue_sound_enabled"
+    static let styleKey = "cue_sound_style"
+    static let defaultStyle: CueSound.Style = .fourth
+    /// 播放音量：声音本身峰值约 -21dBFS，再乘 0.6 ≈ -25dBFS，与 Typeless 实际播放电平相当（它是 -18dBFS × 0.4）
+    static let playbackVolume: Float = 0.6
+
+    private var players: [String: AVAudioPlayer] = [:]
+
+    var isEnabled: Bool {
+        get { VoicePolishConfig.shared.bool(forKey: Self.enabledKey, defaultValue: true) }
+        set { VoicePolishConfig.shared.save(bool: newValue, forKey: Self.enabledKey) }
+    }
+
+    var style: CueSound.Style {
+        VoicePolishConfig.shared.string(forKey: Self.styleKey).flatMap(CueSound.Style.init(rawValue:)) ?? Self.defaultStyle
+    }
+
+    /// 开关关着时什么都不做；`force` 用于设置页里打开开关时试听一下。
+    func play(_ kind: CueSound.Kind, force: Bool = false) {
+        guard force || isEnabled else { return }
+        guard let player = player(for: style, kind: kind) else { return }
+        player.currentTime = 0
+        player.play()
+    }
+
+    func preload() {
+        _ = player(for: style, kind: .start)
+        _ = player(for: style, kind: .stop)
+    }
+
+    private func player(for style: CueSound.Style, kind: CueSound.Kind) -> AVAudioPlayer? {
+        let key = "\(style.rawValue)-\(kind == .start ? "start" : "stop")"
+        if let p = players[key] { return p }
+        guard let p = try? AVAudioPlayer(data: CueSound.wavData(style: style, kind: kind)) else { return nil }
+        p.volume = Self.playbackVolume
+        p.prepareToPlay()
+        players[key] = p
+        return p
+    }
 }

@@ -5,7 +5,16 @@ class TextDelivery {
     enum DeliveryResult: Equatable {
         case pasted
         case copiedOnlyNeedsAccessibility
+        /// 焦点明确不在输入框（桌面、访达、网页空白处…）：照旧按了一次 ⌘V，但剪贴板留着我们的文字，
+        /// 由调用方提示用户自己粘贴。工单 #1016：原先这种情况粘不进去、剪贴板又被还原，文字两头都没了。
+        case pastedKeptClipboard
     }
+
+    /// 当前焦点是不是输入框。`unknown` 要按「可能是」处理——微信这类自绘 App 不向系统暴露结构，
+    /// 读不到不等于不能粘（见 [鼠标长按说话] 的调研），所以只在 `notEditable` / `webNotEditable` 时才改变行为。
+    /// `webNotEditable`：网页里焦点在正文 / 按钮等不能输入的地方。和原生不同，网页可能自己接住 ⌘V
+    /// 把文字塞进输入框（Claude 有时会），所以粘完要回头看一眼焦点有没有跑进输入框，再决定还不还原剪贴板。
+    enum FocusKind { case editable, notEditable, webNotEditable, unknown }
 
     var debugLog: ((String) -> Void)?
 
@@ -67,7 +76,10 @@ class TextDelivery {
         return AXIsProcessTrusted()
     }
 
-    func deliver(text: String) -> DeliveryResult {
+    /// - Parameter onNotLanded: 网页里粘完核实发现文字多半没进输入框时回调（主线程，约 0.25 秒后）。
+    ///   这时剪贴板留着我们的文字，由调用方提示用户手动 ⌘V。工单 #1016 第二轮：Ray 在 Claude 里实测，
+    ///   焦点在网页正文上说完话，文字没粘上、剪贴板又被还原，也没提示。
+    func deliver(text: String, onNotLanded: (() -> Void)? = nil) -> DeliveryResult {
         let finalText = text
 
         // 1. Copy to clipboard —— 先快照用户原有剪贴板内容，贴完后还原，避免“占用剪贴板”。
@@ -85,18 +97,143 @@ class TextDelivery {
             return .copiedOnlyNeedsAccessibility
         }
 
+        // 粘之前先看焦点在哪：只有「明确不是输入框」才改变行为（照样粘一次，但不还原剪贴板）。
+        // 判断不出来一律按原行为走，避免把微信这类读不到结构的 App 弄坏。
+        let focus = focusKind()
+        debugLog?("TextDelivery: focus=\(focus)")
+
         debugLog?("TextDelivery: scheduling paste in 30ms")
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
             self.simulatePaste()
             self.debugLog?("TextDelivery: simulatePaste posted")
+            guard focus != .notEditable else {
+                self.debugLog?("TextDelivery: 焦点不在输入框，剪贴板保留我们的文字，等用户手动 ⌘V")
+                return
+            }
+            if focus == .webNotEditable {
+                // 网页正文上：粘完回头看焦点。页面把文字接进输入框时焦点会跟着进去 → 照常还原剪贴板；
+                // 焦点还停在正文 / 按钮上 → 多半没粘上，剪贴板留着我们的文字并提示用户。
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+                    let after = self.focusKind()
+                    if after == .editable {
+                        self.debugLog?("TextDelivery: 网页粘贴后焦点进了输入框，视为已粘上")
+                        self.restorePasteboard(pasteboard, items: savedItems, expectedChangeCount: changeCountAfterSet)
+                    } else {
+                        self.debugLog?("TextDelivery: 网页粘贴后焦点仍不在输入框（\(after)），保留剪贴板并提示")
+                        onNotLanded?()
+                    }
+                }
+                return
+            }
             // 等粘贴被目标 App 读取后再还原用户原剪贴板。
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
                 self.restorePasteboard(pasteboard, items: savedItems, expectedChangeCount: changeCountAfterSet)
             }
         }
 
-        return .pasted
+        return focus == .notEditable ? .pastedKeptClipboard : .pasted
     }
+
+    /// 读前台 App 的焦点元素，判断能不能往里打字。
+    ///
+    /// 原则：**只有拿到确凿证据才敢说「不能输入」**。误判的代价是占掉用户的剪贴板、还弹一条假提示。
+    /// 2026-09-22 真机实测（工单 #1016 第一版就栽在这里，ChatGPT / Claude 全被判成"不能输入"）：
+    ///   ChatGPT   焦点 = AXWindow（Chromium 没建内容树，只给一个窗口壳）
+    ///   Claude    焦点 = AXGroup，subrole AXDocumentArticle（网页正文区，⌘V 照样能粘进去）
+    ///   访达桌面  焦点 = AXGroup < AXScrollArea < AXApplication（图标区，真的不能输入）
+    ///   微信/备忘录（非前台时）读不到焦点
+    /// 「访达桌面的 AXGroup」和「Claude 正文的 AXGroup」角色一模一样，光看角色分不开，
+    /// 所以先把网页内容整片排除掉，剩下的原生控件才按角色判。
+    func focusKind() -> FocusKind {
+        guard let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier else { return .unknown }
+        if pid == ProcessInfo.processInfo.processIdentifier { return .unknown }   // 自家窗口（引导/工单输入框）不掺和
+        let app = AXUIElementCreateApplication(pid)
+        AXUIElementSetMessagingTimeout(app, Self.axTimeout)   // 对方 App 卡住时不能拖住出字
+        var focused: AnyObject?
+        guard AXUIElementCopyAttributeValue(app, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+              let element = focused as! AXUIElement? else {
+            debugLog?("TextDelivery: focus 元素读不到（App 未暴露结构或没有焦点）")
+            return .unknown   // 微信这类自绘 App，也可能真的没焦点，不赌
+        }
+        let role = TextInputLocator.role(of: element)
+        let subrole = TextInputLocator.attribute(element, kAXSubroleAttribute) as? String ?? "-"
+        debugLog?("TextDelivery: focus 元素 role=\(role) subrole=\(subrole)")
+
+        if Self.looksEditable(element) { return .editable }
+        // 只给出窗口壳 = Chromium/Electron 没建内容树。请它建一次（下次就能读到真角色），这次按老行为走。
+        if role == "AXWindow" || role == "AXApplication" || role == "?" {
+            AccessibilityTreeRequester.requestIfNeeded(app: app, pid: pid) { [weak self] in
+                self?.debugLog?("TextDelivery: \($0)")
+            }
+            return .unknown
+        }
+        // 网页正文本身 / 网页里的非输入元素：能确认在网页里、且自身和祖先都没有「可编辑」标记，才判 webNotEditable。
+        if role == "AXWebArea" || Self.isWebSubrole(subrole) { return .webNotEditable }
+        switch Self.classifyAncestry(element) {
+        case .web:
+            return .webNotEditable
+        case .native:
+            // 原生 App：角色得在「一眼就知道不能输入」的表里才下结论
+            return Self.definitelyNotEditableRoles.contains(role) ? .notEditable : .unknown
+        case .undetermined:
+            return .unknown
+        }
+    }
+
+    /// 能往里打字的迹象：输入框角色、值可写、或（网页里）带可编辑祖先标记。
+    /// 2026-09-23 Chrome 实测：textarea 和 contenteditable 的焦点都是 AXTextArea 且带 AXEditableAncestor；
+    /// 点在正文上焦点是 AXWebArea、点按钮是 AXButton，都没有这个标记。
+    static func looksEditable(_ element: AXUIElement) -> Bool {
+        if TextInputLocator.isTextInput(element) { return true }
+        var settable: DarwinBoolean = false
+        if AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable) == .success, settable.boolValue {
+            return true   // 角色不在白名单但值可写（部分富文本）：当能输入处理，行为与老版一致
+        }
+        return TextInputLocator.attribute(element, "AXEditableAncestor") != nil
+    }
+
+    private static func isWebSubrole(_ subrole: String) -> Bool {
+        subrole.hasPrefix("AXLandmark") || subrole.hasPrefix("AXDocument")
+    }
+
+    private enum Ancestry { case native, web, undetermined }
+
+    /// 往上翻祖先链给焦点元素归类：见到网页痕迹 = web；干干净净走到 AXApplication 且层数浅 = native；
+    /// 超时 / 翻不完 = undetermined（按老行为走，不赌）。
+    /// 找网页痕迹可以翻得比原生判定更深：Claude 的元素上面能套十几层 AXGroup。
+    private static func classifyAncestry(_ element: AXUIElement) -> Ancestry {
+        let deadline = Date().addingTimeInterval(chainWalkBudget)
+        var cursor = element
+        for level in 1...maxWebSearchLevels {
+            if Date() > deadline { return .undetermined }
+            guard let parent = TextInputLocator.attribute(cursor, kAXParentAttribute) else { return .undetermined }
+            let next = parent as! AXUIElement
+            let role = TextInputLocator.role(of: next)
+            if role == "AXWebArea" { return .web }
+            if isWebSubrole(TextInputLocator.attribute(next, kAXSubroleAttribute) as? String ?? "") { return .web }
+            if role == "AXApplication" { return level <= maxAncestorLevels ? .native : .undetermined }
+            cursor = next
+        }
+        return .undetermined
+    }
+
+    /// 单次跨进程调用的超时：出字这条路上不能因为对方 App 没响应而卡住。
+    private static let axTimeout: Float = 0.25
+    /// 往上最多翻几层祖先。原生 App 从焦点到 AXApplication 通常 2–6 层，给到 12 绰绰有余；
+    /// 超过就认定是网页那种深树，不下"不能输入"的结论。
+    private static let maxAncestorLevels = 12
+    /// 找网页痕迹时最多翻几层（Chromium 树很深，给足；总时间仍受 chainWalkBudget 限制）
+    private static let maxWebSearchLevels = 40
+    /// 翻祖先链的总时间预算：出字这条路在主线程上，不能被没响应的 App 拖住。
+    private static let chainWalkBudget: TimeInterval = 0.12
+
+    /// 只列「一眼就知道不能往里打字」的原生角色；拿不准的角色一律不进这个表，走 unknown 保守路线。
+    /// AXWindow 不在这里——它多半意味着"这个 App 没暴露内容"，而不是"不能输入"（见 focusKind）。
+    private static let definitelyNotEditableRoles: Set<String> = [
+        "AXButton", "AXStaticText", "AXImage", "AXMenuBar", "AXMenuBarItem",
+        "AXList", "AXTable", "AXOutline", "AXScrollArea", "AXToolbar", "AXTabGroup",
+        "AXRadioButton", "AXCheckBox", "AXSlider", "AXProgressIndicator", "AXGroup", "AXSplitGroup",
+    ]
 
     /// 快照当前剪贴板的全部条目（文字/图片/文件等所有类型），用独立副本保存以便稍后写回。
     private func snapshotPasteboard(_ pasteboard: NSPasteboard) -> [NSPasteboardItem] {

@@ -181,3 +181,22 @@ final class TrialManagerTests: XCTestCase {
         XCTAssertTrue(m.isTotalExhausted)
     }
 }
+
+extension TrialManagerTests {
+    /// 握手请求体：自带 Key 标记只在 App 明确知道时才带（老版本 / 其他端不带，服务器保留原值）
+    func testStartBodyOwnKeyFlag() {
+        let withKey = TrialManager.startBody(deviceID: "d", appVersion: "3.0.4", osVersion: "15.7",
+                                             selfChars: 120, selfReqs: 2, ownKeyConfigured: true)
+        XCTAssertEqual(withKey["own_key"] as? Bool, true)
+        XCTAssertEqual((withKey["usage"] as? [String: Int])?["chars"], 120)
+
+        let onTrial = TrialManager.startBody(deviceID: "d", appVersion: "3.0.4", osVersion: "15.7",
+                                             selfChars: 0, selfReqs: 0, ownKeyConfigured: false)
+        XCTAssertEqual(onTrial["own_key"] as? Bool, false)
+
+        let unknown = TrialManager.startBody(deviceID: "d", appVersion: "3.0.3", osVersion: "15.7",
+                                            selfChars: 0, selfReqs: 0, ownKeyConfigured: nil)
+        XCTAssertNil(unknown["own_key"])
+        XCTAssertEqual(unknown["device_id"] as? String, "d")
+    }
+}

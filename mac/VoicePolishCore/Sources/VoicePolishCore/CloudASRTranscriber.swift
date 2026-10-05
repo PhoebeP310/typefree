@@ -165,20 +165,11 @@ public final class CloudASRTranscriber {
         config.save(value: version.rawValue, forKey: "bigasr_version")
     }
 
-    /// 生成 API 的 corpus.context JSON 字符串（dialog_ctx 上下文格式）。
-    /// 注意：不要改回 {"hotwords":[...]} 内联格式——那是流式接口的写法，
-    /// 录音文件接口（极速版/标准版/2.0）会静默忽略它；dialog_ctx 三个版本实测均生效。
+    /// 生成 API 的 corpus.context JSON 字符串：词库按官方「热词直传」格式传，另附 dialog_ctx 提示句（见 PersonalVocabulary.VolcanoVocabMode）。
+    /// 2026-09-23 核对官方文档：录音文件接口（极速版 / 标准版）正式支持 {"hotwords":[{"word":…}]} 直传，
+    /// 旧注释说「录音文件接口会静默忽略它」已被新版文档否定。
     private func hotWordsContextJSON() -> String? {
-        guard let sentence = PersonalVocabulary.asrContextSentence() else { return nil }
-        let contextObj: [String: Any] = [
-            "context_type": "dialog_ctx",
-            "context_data": [["text": sentence]]
-        ]
-        guard let contextData = try? JSONSerialization.data(withJSONObject: contextObj),
-              let contextStr = String(data: contextData, encoding: .utf8) else {
-            return nil
-        }
-        return contextStr
+        PersonalVocabulary.volcanoContextJSON()
     }
 
     /// 热词请求字段。三个版本一致：内联热词、热词表、替换词表全部放在 request.corpus 下。
@@ -315,7 +306,7 @@ public final class CloudASRTranscriber {
             }
             let body = makeRequestBody(audioData: audioData, format: audioFormat)
             let hotWordCount = PersonalVocabulary.currentWords().count
-            debugLog?("Cloud ASR: version=\(version.rawValue) provider=volcano resource=\(version.resourceID) sync=\(version.isSync) hotwords=\(hotWordCount) audio=\(audioFormat)/\(audioData.count / 1024)KB budget=\(Int(budget))s")
+            debugLog?("Cloud ASR: version=\(version.rawValue) provider=volcano resource=\(version.resourceID) sync=\(version.isSync) hotwords=\(hotWordCount) vocab=\(PersonalVocabulary.currentVolcanoVocabMode().rawValue) audio=\(audioFormat)/\(audioData.count / 1024)KB budget=\(Int(budget))s")
             if version.isSync {
                 transcribeSync(body: body, credentials: credentials, resourceID: version.resourceID, budgetSeconds: budget, completion: completion)
             } else {
@@ -338,11 +329,17 @@ public final class CloudASRTranscriber {
         }
     }
 
-    /// 按音频时长给出识别等待预算：基础 60s + 时长×0.5，封顶 600s（10 分钟）。
-    /// 短录音 ≈ 60s 不变；30 分钟（1800s）→ 封顶 600s，足够异步接口处理完。
+    /// 按音频时长给出识别等待预算：基础 20s + 时长×0.5，封顶 600s（10 分钟）。
+    /// 正常识别一两秒就回来；以前基础 60s，网络一卡每一步都要干等一分钟（工单 #1024 叠加重试卡了近 3 分钟）。
+    /// 长录音仍按时长放宽：30 分钟（1800s）→ 封顶 600s，足够异步接口处理完。
     static func recognitionBudget(audioSeconds: Double) -> TimeInterval {
-        return min(600, max(60, audioSeconds * 0.5 + 60))
+        return min(600, max(20, audioSeconds * 0.5 + 20))
     }
+
+    /// 异步接口「提交」只是把音频交上去排队，服务器马上回；「查询」每次也是立刻回状态。
+    /// 这两类请求迟迟没回音就是连接卡住了，没必要陪到整段预算用完。
+    static let submitStallTimeout: TimeInterval = 20
+    static let queryStallTimeout: TimeInterval = 10
 
     // MARK: - 试用代理（POST /trial/asr，owner 出 API 费）
 
@@ -429,7 +426,7 @@ public final class CloudASRTranscriber {
             completion(.failure(TranscriptionError.invalidAudio))
             return
         }
-        submitReq.timeoutInterval = budgetSeconds
+        submitReq.timeoutInterval = min(budgetSeconds, Self.submitStallTimeout)
         do {
             submitReq.httpBody = try JSONSerialization.data(withJSONObject: body)
         } catch {
@@ -464,6 +461,8 @@ public final class CloudASRTranscriber {
             return
         }
         queryReq.httpBody = try? JSONSerialization.data(withJSONObject: [String: Any]())
+        // 以前没设，沿用 makeRequest 的 60s：一次查询卡住就要等满一分钟（工单 #1024 日志）
+        queryReq.timeoutInterval = max(1, min(Self.queryStallTimeout, deadline.timeIntervalSinceNow))
 
         URLSession.shared.dataTask(with: queryReq) { data, response, error in
             if let error = error {
