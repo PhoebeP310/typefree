@@ -26,7 +26,7 @@ final class PersonalVocabularyTests: XCTestCase {
     func testPersonalWordCountDedupesAndCaps() {
         XCTAssertEqual(PersonalVocabulary.personalWordCount(custom: ["Liam", "liam", "喊单|10", " "],
                                                             vocabularyTargets: ["喊单", "徐相"]), 3)
-        XCTAssertEqual(PersonalVocabulary.personalWordCount(custom: (0..<150).map { "w\($0)" },
+        XCTAssertEqual(PersonalVocabulary.personalWordCount(custom: (0..<(PersonalVocabulary.maxWords + 50)).map { "w\($0)" },  // 本地改动：随上限调整，确保超出上限
                                                             vocabularyTargets: ["徐相"]), PersonalVocabulary.maxWords)
         XCTAssertEqual(PersonalVocabulary.personalWordCount(custom: [], vocabularyTargets: []), 0)
     }
