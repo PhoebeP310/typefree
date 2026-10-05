@@ -18,6 +18,13 @@ public enum CueSound {
         case third     // 大三度：更暖、更低
         case single    // 单音：最克制
         case knock     // 本地改动：指节敲木桌，闷闷的「咚」，不是乐音
+        case mahjong   // 本地改动：麻将牌落桌（厚牌、偏闷）
+        case woodfish  // 本地改动：低音木鱼，空心木头的「笃」
+        case goStone   // 本地改动：围棋落子，石子「啪」+ 棋盘闷响
+        case cork      // 本地改动：软木塞「啵」，音高往下滑
+
+        /// 本地改动：敲击类（非乐音）
+        public var isPercussive: Bool { [.knock, .mahjong, .woodfish, .goStone, .cork].contains(self) }
 
         public var displayName: String {
             switch self {
@@ -26,6 +33,10 @@ public enum CueSound {
             case .third: return "三度双音"
             case .single: return "单音"
             case .knock: return "指节敲木桌"
+            case .mahjong: return "麻将牌"
+            case .woodfish: return "低音木鱼"
+            case .goStone: return "围棋落子"
+            case .cork: return "软木塞"
             }
         }
     }
@@ -56,13 +67,13 @@ public enum CueSound {
         var dry = [Float](repeating: 0, count: n)
         let lead = 0.004
         var wet: Float = 0.32
-        if style == .knock {
-            // 本地改动：开始敲一下；结束敲两下，第二下低一点、轻一点
+        if let hit = Hit.preset(style) {
+            // 本地改动：敲击类：开始敲一下；结束敲两下，第二下低一点、轻一点
             if up {
-                addKnock(&dry, pitch: 1.0, at: lead, amp: 1.0)
+                addHit(&dry, hit, pitch: 1.0, at: lead, amp: 1.0)
             } else {
-                addKnock(&dry, pitch: 1.08, at: lead, amp: 1.0)
-                addKnock(&dry, pitch: 0.9, at: lead + 0.09, amp: 0.75)
+                addHit(&dry, hit, pitch: 1.08, at: lead, amp: 1.0)
+                addHit(&dry, hit, pitch: 0.9, at: lead + hit.doubleGap, amp: 0.75)
             }
             wet = 0.12   // 只留一点房间感，敲击声要干
         } else {
@@ -73,7 +84,7 @@ public enum CueSound {
             case .fifth:  notes = up ? [349.23, 523.25] : [523.25, 349.23]   // F4→C5 / C5→F4
             case .third:  notes = up ? [311.13, 392.0] : [392.0, 311.13]     // E♭4→G4 / G4→E♭4
             case .single: notes = up ? [587.33] : [440.0]                    // D5 / A4
-            case .knock:  notes = []
+            case .knock, .mahjong, .woodfish, .goStone, .cork: notes = []
             }
             for (i, f) in notes.enumerated() {
                 let isLast = i == notes.count - 1
@@ -117,30 +128,67 @@ public enum CueSound {
         }
     }
 
-    /// 本地改动：指节敲木桌。三个快速衰减的低频分量（指节的「咚」+ 桌板共鸣），
-    /// 开头 4ms 一点点撞击噪声，整体过一阶低通去掉高频，听着发闷。1ms 起音避免爆音。
-    static func addKnock(_ buf: inout [Float], pitch: Double, at start: Double, amp: Double) {
+    /// 本地改动：敲击声参数。modes = [(频率Hz, 振幅, 衰减秒)]；开头一小段撞击噪声；整体过一阶低通（截止越低越闷）；
+    /// sweep = 音高从 n 倍快速滑回原位（软木塞那种「啵」）。
+    struct Hit {
+        let modes: [(Double, Double, Double)]
+        let noise: Double
+        let noiseMs: Double
+        let lowpass: Double
+        let length: Double
+        var sweep: (Double, Double)? = nil
+        var doubleGap: Double = 0.09
+
+        static func preset(_ style: Style) -> Hit? {
+            switch style {
+            case .knock:    // 指节的「咚」+ 桌板共鸣
+                return Hit(modes: [(150, 1.0, 0.030), (410, 0.45, 0.018), (980, 0.12, 0.008)],
+                           noise: 0.25, noiseMs: 4, lowpass: 1100, length: 0.14)
+            case .mahjong:  // 厚牌落桌：短促硬质，靠低通压掉脆感
+                return Hit(modes: [(680, 1.0, 0.028), (1074, 0.55, 0.016), (1578, 0.2, 0.008)],
+                           noise: 0.35, noiseMs: 4, lowpass: 1300, length: 0.12, doubleGap: 0.055)
+            case .woodfish: // 空心木头，带一点余音
+                return Hit(modes: [(470, 1.0, 0.055), (760, 0.35, 0.030), (1290, 0.12, 0.012)],
+                           noise: 0.15, noiseMs: 4, lowpass: 1800, length: 0.22)
+            case .goStone:  // 石子很短的「啪」+ 棋盘木头闷响
+                return Hit(modes: [(240, 0.8, 0.060), (520, 0.5, 0.020), (1400, 0.15, 0.005)],
+                           noise: 0.35, noiseMs: 3, lowpass: 1600, length: 0.2)
+            case .cork:     // 「啵」：音高快速下滑
+                return Hit(modes: [(260, 1.0, 0.040), (520, 0.2, 0.020)],
+                           noise: 0.05, noiseMs: 4, lowpass: 1400, length: 0.16, sweep: (2.2, 0.012))
+            default:
+                return nil
+            }
+        }
+    }
+
+    static func addHit(_ buf: inout [Float], _ hit: Hit, pitch: Double, at start: Double, amp: Double) {
         let s0 = Int(start * sampleRate)
-        let modes: [(Double, Double, Double)] = [(150, 1.0, 0.030), (410, 0.45, 0.018), (980, 0.12, 0.008)]
-        let len = min(buf.count - s0, Int(0.14 * sampleRate))
+        let len = min(buf.count - s0, Int(hit.length * sampleRate))
         guard len > 0 else { return }
         var seed: UInt64 = 0x9E3779B97F4A7C15 &* UInt64(pitch * 1000)
-        var hit = [Double](repeating: 0, count: len)
+        var phases = [Double](repeating: 0, count: hit.modes.count)
+        var out = [Double](repeating: 0, count: len)
         for i in 0..<len {
             let t = Double(i) / sampleRate
+            var k = 1.0
+            if let (mult, tau) = hit.sweep { k = 1 + (mult - 1) * exp(-t / tau) }
             var v = 0.0
-            for (f, a, tau) in modes { v += a * exp(-t / tau) * sin(2 * .pi * f * pitch * t) }
-            if t < 0.004 {
+            for (m, mode) in hit.modes.enumerated() {
+                phases[m] += 2 * .pi * mode.0 * pitch * k / sampleRate
+                v += mode.1 * exp(-t / mode.2) * sin(phases[m])
+            }
+            if t < hit.noiseMs / 1000 {
                 seed = seed &* 6364136223846793005 &+ 1442695040888963407
                 let noise = Double(seed >> 33) / Double(1 << 31) * 2 - 1
-                v += 0.25 * noise * exp(-t / 0.0013)
+                v += hit.noise * noise * exp(-t / (hit.noiseMs / 3000))
             }
-            hit[i] = v
+            out[i] = v
         }
-        let a = exp(-2 * .pi * 1100 / sampleRate)
+        let a = exp(-2 * .pi * hit.lowpass / sampleRate)
         var y = 0.0
         for i in 0..<len {
-            y = (1 - a) * hit[i] + a * y
+            y = (1 - a) * out[i] + a * y
             let attack = min(1, Double(i) / (0.001 * sampleRate))
             buf[s0 + i] += Float(amp * attack * y)
         }

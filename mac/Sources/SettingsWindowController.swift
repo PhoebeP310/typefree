@@ -4262,20 +4262,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
 
-        // 本地改动：声音样式可选（原来只能改 config 的 cue_sound_style），点哪个就切到哪个并试听一下
-        let styles = CueSound.Style.allCases
-        let seg = VPSegmentedControl(
-            labels: styles.map(\.displayName),
-            trackBg: theme.cardAlt,
-            trackBorder: theme.sep,
-            selBg: theme.segSelBg,
-            selBorder: theme.sep,
-            selText: theme.text,
-            normalText: theme.text2,
-            target: self,
-            action: #selector(cueSoundStyleChanged(_:)))
-        seg.selectedSegment = styles.firstIndex(of: CuePlayer.shared.style) ?? 0
+        // 本地改动：声音样式可选（原来只能改 config 的 cue_sound_style），选中就切过去并试听一下；
+        // 9 种一排放不下，用下拉，名称前缀区分「乐音 / 敲击」两组
+        let items = CueSound.Style.allCases.map { st in
+            VPDropdown.Item(value: st.rawValue, title: (st.isPercussive ? "敲击 · " : "乐音 · ") + st.displayName)
+        }
+        let seg = VPDropdown(items: items, selectedValue: CuePlayer.shared.style.rawValue,
+                             trackBg: theme.card,
+                             trackBorder: Self.dropdownBorder,
+                             textColor: theme.text, chevronColor: theme.text3,
+                             warnColor: theme.danger, mutedColor: theme.text3)
         seg.setAccessibilityLabel("提示音样式")
+        seg.onSelect = { [weak self] value in
+            self?.config.save(value: value, forKey: CuePlayer.styleKey)
+            CuePlayer.shared.play(.start, force: true)   // 选了就响一下，不用去录音才听得到
+        }
 
         let col = NSStackView()
         col.orientation = .vertical
@@ -4291,13 +4292,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         mount(col, in: card)
         return card
-    }
-
-    @objc private func cueSoundStyleChanged(_ sender: VPSegmentedControl) {
-        let styles = CueSound.Style.allCases
-        guard styles.indices.contains(sender.selectedSegment) else { return }
-        config.save(value: styles[sender.selectedSegment].rawValue, forKey: CuePlayer.styleKey)
-        CuePlayer.shared.play(.start, force: true)   // 选了就响一下，不用去录音才听得到
     }
 
     @objc private func cueSoundChanged(_ sender: VPToggle) {
