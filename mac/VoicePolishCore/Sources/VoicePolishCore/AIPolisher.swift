@@ -93,6 +93,8 @@ public class AIPolisher {
     }
 
     private static let defaultDoubaoPolishModel = "doubao-seed-2-0-pro-260215"
+    // 本地改动：DeepSeek 润色（OpenAI 兼容接口）
+    private static let defaultDeepSeekPolishModel = "deepseek-chat"
     private let apiURL = URL(string: "https://ark.cn-beijing.volces.com/api/v3/chat/completions")!
     private let model = AIPolisher.defaultDoubaoPolishModel
     public var debugLog: ((String) -> Void)?
@@ -122,6 +124,8 @@ public class AIPolisher {
             return PolishSelection(provider: "qwen", model: (saved?.isEmpty == false) ? saved! : "qwen3.6-flash")
         case "zhipu":
             return PolishSelection(provider: "zhipu", model: config.string(forKey: "zhipu_polish_model") ?? "glm-4.7-flash")
+        case "deepseek":
+            return PolishSelection(provider: "deepseek", model: config.string(forKey: "deepseek_polish_model") ?? defaultDeepSeekPolishModel)
         default:
             let saved = config.string(forKey: "doubao_polish_model")
             return PolishSelection(provider: "doubao", model: (saved?.isEmpty == false) ? saved! : defaultDoubaoPolishModel)
@@ -440,6 +444,12 @@ public class AIPolisher {
             let model = config.string(forKey: "zhipu_polish_model") ?? "glm-4.7-flash"
             let url = URL(string: "https://open.bigmodel.cn/api/paas/v4/chat/completions")!
             return ("zhipu", url, model, key)
+        case "deepseek":
+            guard let key = config.string(forKey: "deepseek_api_key", envKey: "DEEPSEEK_API_KEY"),
+                  !key.isEmpty else { return nil }
+            let model = config.string(forKey: "deepseek_polish_model") ?? Self.defaultDeepSeekPolishModel
+            let url = URL(string: "https://api.deepseek.com/chat/completions")!
+            return ("deepseek", url, model, key)
         default:
             guard let key = getAPIKey() else { return nil }
             let saved = config.string(forKey: "doubao_polish_model")
@@ -491,6 +501,9 @@ public class AIPolisher {
                 body["temperature"] = 0.1
                 body["max_tokens"] = 2000
                 body["thinking"] = ["type": "disabled"]
+            } else if provider.name == "deepseek" {
+                body["temperature"] = 0.1
+                body["max_tokens"] = 2000
             } else {  // doubao
                 body["temperature"] = 0.1
                 body["max_tokens"] = 2000
