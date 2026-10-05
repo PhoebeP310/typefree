@@ -45,9 +45,8 @@ enum MouseHoldToTalkSettings {
     static var isEnabled: Bool {
         VoicePolishConfig.shared.bool(forKey: enabledKey, defaultValue: defaultEnabled)
     }
-    static var isAskEnabled: Bool {
-        VoicePolishConfig.shared.bool(forKey: askEnabledKey, defaultValue: askDefaultEnabled)
-    }
+    // 本地改动：去掉「随时问 AI」，空白处长按不再触发
+    static var isAskEnabled: Bool { false }
 }
 
 /// 按住期间的「拖开取消」手势快照（AppKit 屏幕坐标，左下原点）

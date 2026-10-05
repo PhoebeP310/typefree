@@ -2226,7 +2226,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         gestures.alignment = .centerY
         gestures.spacing = 28
         gestures.addArrangedSubview(makeGestureHint(key: "输入框里按住鼠标", label: "说话", feature: .mouseHold))
-        gestures.addArrangedSubview(makeGestureHint(key: "空白处按住鼠标", label: "问 AI", feature: .ask))
         gestures.addArrangedSubview(makeGestureHint(key: "结尾说「用英文」", label: "翻译", feature: .translation))
 
         let main = NSStackView()
@@ -3589,7 +3588,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             detailTitle: "语言与口令设置", details: { self.makeOutputLanguageCommandOptions() }
         ))
         stack.addArrangedSubview(makeMouseHoldToTalkCard())
-        stack.addArrangedSubview(makeMouseHoldAskCard())
     }
 
     private func makeExploreCard(id: String, title: String, summary: String,
