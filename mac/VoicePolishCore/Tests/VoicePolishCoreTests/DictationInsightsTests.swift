@@ -107,4 +107,50 @@ final class DictationInsightsTests: XCTestCase {
         XCTAssertEqual(ActivityHeatmap.columnsThatFit(width: 129, minCell: 10, gap: 3, maxColumns: 26), 10)
         XCTAssertEqual(ActivityHeatmap.columnsThatFit(width: 0, minCell: 10, gap: 3, maxColumns: 26), 1)
     }
+
+    // 本地改动：铺满宽度的排布：网格宽度正好等于给的宽度，格子取整在 12–22，间距 3–4，最多 53 列
+    func testHeatmapFillLayoutSpansFullWidth() {
+        // 1100 宽窗口：卡片内宽 762，减去 20 的星期标签 = 742
+        let m = ActivityHeatmap.fillLayout(width: 742)
+        XCTAssertEqual(m.columns, 49)
+        XCTAssertEqual(m.cell, 12)
+        XCTAssertEqual(m.width, 742, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(m.gap, 3)
+        XCTAssertLessThanOrEqual(m.gap, 4)
+
+        // 内容区最宽 880：卡片内宽 832 → 812，53 周封顶
+        let wide = ActivityHeatmap.fillLayout(width: 812)
+        XCTAssertEqual(wide.columns, 53)
+        XCTAssertEqual(wide.width, 812, accuracy: 0.001)
+
+        // 列数封顶后格子变大，间距仍在 3–4
+        let wider = ActivityHeatmap.fillLayout(width: 1000)
+        XCTAssertEqual(wider.columns, 53)
+        XCTAssertEqual(wider.cell, 15)
+        XCTAssertEqual(wider.width, 1000, accuracy: 0.001)
+        XCTAssertTrue((3...4).contains(wider.gap))
+
+        // 各种宽度都铺满、格子在范围内
+        for w in stride(from: CGFloat(200), through: 1300, by: 37) {
+            let x = ActivityHeatmap.fillLayout(width: w)
+            XCTAssertEqual(x.width, w, accuracy: 0.001, "width \(w)")
+            XCTAssertTrue((12...22).contains(x.cell), "width \(w) cell \(x.cell)")
+            XCTAssertTrue((3...4.1).contains(x.gap), "width \(w) gap \(x.gap)")
+        }
+    }
+
+    func testHeatmapFillLayoutEdgeCases() {
+        let zero = ActivityHeatmap.fillLayout(width: 0)
+        XCTAssertEqual(zero.columns, 1)
+        // 极宽：53 列、格子封顶 22，余量摊进间距，仍铺满
+        let huge = ActivityHeatmap.fillLayout(width: 2000)
+        XCTAssertEqual(huge.columns, 53)
+        XCTAssertEqual(huge.cell, 22)
+        XCTAssertEqual(huge.width, 2000, accuracy: 0.001)
+        // 新的列数直接给 compute：最新一周仍在最右
+        let h = ActivityHeatmap.compute(records: [], today: date("2026-10-05"), weeks: 53, calendar: cal)
+        XCTAssertEqual(h.columns.count, 53)
+        XCTAssertEqual(h.columns.last?.first?.date, "2026-10-05")
+        XCTAssertEqual(h.columns.first?.first?.date, "2025-10-06", "往前 52 周")
+    }
 }

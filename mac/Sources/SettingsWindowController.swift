@@ -585,6 +585,62 @@ private final class VocabChipView: NSView {
     }
 }
 
+// 本地改动：等宽自适应网格（词库页同步热词用）：宽度够就 3 列，窄于阈值退成 2 列；
+// 子视图固定行高，由这里手动排 frame，高度随行数走 intrinsicContentSize。
+private final class AdaptiveGridView: NSView {
+    private let items: [NSView]
+    private let rowHeight: CGFloat
+    private let spacing: CGFloat
+    private let twoColumnsBelow: CGFloat
+    private var lastColumns = 0
+
+    override var isFlipped: Bool { true }
+
+    init(items: [NSView], rowHeight: CGFloat, spacing: CGFloat, twoColumnsBelow: CGFloat) {
+        self.items = items
+        self.rowHeight = rowHeight
+        self.spacing = spacing
+        self.twoColumnsBelow = twoColumnsBelow
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        for v in items {
+            v.translatesAutoresizingMaskIntoConstraints = true
+            addSubview(v)
+        }
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    private var columns: Int { bounds.width > 0 && bounds.width < twoColumnsBelow ? 2 : 3 }
+
+    private var rows: Int { (items.count + columns - 1) / columns }
+
+    override var intrinsicContentSize: NSSize {
+        let r = CGFloat(rows)
+        return NSSize(width: NSView.noIntrinsicMetric, height: max(0, r * rowHeight + (r - 1) * spacing))
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        if columns != lastColumns {
+            lastColumns = columns
+            invalidateIntrinsicContentSize()
+        }
+        needsLayout = true
+    }
+
+    override func layout() {
+        super.layout()
+        let cols = columns
+        let w = (bounds.width - CGFloat(cols - 1) * spacing) / CGFloat(cols)
+        guard w > 0 else { return }
+        for (i, v) in items.enumerated() {
+            let col = i % cols, row = i / cols
+            v.frame = NSRect(x: CGFloat(col) * (w + spacing), y: CGFloat(row) * (rowHeight + spacing),
+                             width: w, height: rowHeight)
+        }
+    }
+}
+
 // MARK: - 录音浮窗样式预览
 
 /// 录音浮窗样式的「静态缩略图」：按 OverlayWindow 里 SiriCapsuleView 的真实配色，
@@ -1113,6 +1169,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     private weak var variantPopoverField: NSTextField?
     private var variantPopoverEntryIndex: Int = -1
     private var vocabFilter = 0   // 0=所有 1=自动学习 2=手动添加
+    // 本地改动：本次构建词库页时每张热词卡片对应的词，× 按钮的 tag 是这里的下标
+    private var syncedHotWordTargets: [String] = []
 
     private var bigASRAPIKeyField: NSSecureTextField?
     private var bailianKeyField: NSSecureTextField?
@@ -6438,8 +6496,15 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.addArrangedSubview(quickAdd)
         stack.setCustomSpacing(20, after: quickAdd)
 
+        // 本地改动：自动同步的热词按 hot_words_groups 分组，和词条一起受下面的筛选控制
+        let json = config.loadConfig()
+        let hotGroups = SyncedHotWords.groups(hotWords: json[SyncedHotWords.hotWordsKey] as? [String] ?? [],
+                                              groupMap: json[SyncedHotWords.groupsKey] as? [String: [String]])
+        let visibleHotGroups = SyncedHotWords.filter(hotGroups, by: SyncedHotWords.Filter(rawValue: vocabFilter) ?? .all)
+
         // 词条网格（含筛选）
-        if vocabularyEntries.isEmpty {
+        // 本地改动：只有同步热词、没有词条时也显示筛选
+        if vocabularyEntries.isEmpty && hotGroups.isEmpty {
             let empty = makeEmptyState("还没有词。在上面输入一个常说的人名、产品名试试。")
             stack.addArrangedSubview(empty)
             stack.setCustomSpacing(20, after: empty)
@@ -6469,12 +6534,12 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 }
                 .map { (index: $0.offset, entry: $0.element) }
 
-            if visible.isEmpty {
+            if visible.isEmpty && visibleHotGroups.isEmpty {
                 let empty = label(vocabFilter == 1 ? "还没有自动学到的词。" : "还没有手动添加的词。",
                                   size: 13, weight: .regular, color: theme.text3)
                 stack.addArrangedSubview(empty)
                 stack.setCustomSpacing(20, after: empty)
-            } else {
+            } else if !visible.isEmpty {
                 let grid = makeVocabGrid(visible)
                 stack.addArrangedSubview(grid)
                 stack.setCustomSpacing(20, after: grid)
@@ -6488,41 +6553,126 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let builtinCard = makeBuiltinHotWordsCard()
         stack.addArrangedSubview(builtinCard)
 
-        // 本地改动：只读展示自动同步进来的 hot_words（为空不显示）
-        if let syncedCard = makeSyncedHotWordsCard() {
-            stack.setCustomSpacing(8, after: builtinCard)
-            stack.addArrangedSubview(syncedCard)
+        // 本地改动：自动同步的热词，按来源分组的小词卡网格（为空或筛选后为空不显示）
+        if let synced = makeSyncedHotWordsSection(groups: visibleHotGroups,
+                                                  total: hotGroups.reduce(0) { $0 + $1.words.count }) {
+            stack.setCustomSpacing(28, after: builtinCard)
+            stack.addArrangedSubview(synced)
         }
     }
 
-    // 本地改动：「自动同步的热词」只读卡片，内容为 config 的 hot_words 全量，用「、」连成可换行的文本
-    private func makeSyncedHotWordsCard() -> NSView? {
-        let words = (config.loadConfig()["hot_words"] as? [String] ?? [])
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        guard !words.isEmpty else { return nil }
+    // 本地改动：「自动同步的热词」区块（替换原来把 hot_words 用「、」连成一大段的只读卡片）：
+    // 标题 + 说明，下面每个来源一节「组名 · 个数」+ 3 列小词卡（窄窗口 2 列），悬停词卡出现 × 删除。
+    private func makeSyncedHotWordsSection(groups: [SyncedHotWords.Group], total: Int) -> NSView? {
+        syncedHotWordTargets = []
+        guard !groups.isEmpty else { return nil }
 
-        let card = makeCard()
-        let title = label("自动同步的热词（\(words.count) 个）", size: 14, weight: .medium, color: theme.text)
-        let desc = makeWrappingLabel("每周一 09:00 从工作资料自动更新，识别时优先认出这些词。要增删请改 terms.txt（业务词）或 people.txt（同事名）。",
+        let section = NSStackView()
+        section.orientation = .vertical
+        section.alignment = .leading
+        section.spacing = 0
+        section.translatesAutoresizingMaskIntoConstraints = false
+
+        let title = label("自动同步的热词（\(total) 个）", size: 14, weight: .medium, color: theme.text)
+        let desc = makeWrappingLabel("每周一 09:00 从工作资料自动更新，识别时优先认出这些词。不需要的点 × 删除，之后不会再加回来。",
                                      size: 12, weight: .regular, color: theme.text3)
-        let body = makeWrappingLabel(words.joined(separator: "、"), size: 12, weight: .regular, color: theme.text2)
+        section.addArrangedSubview(title)
+        section.setCustomSpacing(2, after: title)
+        section.addArrangedSubview(desc)
+        desc.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+        section.setCustomSpacing(16, after: desc)
 
-        let column = NSStackView()
-        column.orientation = .vertical
-        column.alignment = .leading
-        column.spacing = 2
-        column.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
-        column.addArrangedSubview(title)
-        column.addArrangedSubview(desc)
-        column.setCustomSpacing(10, after: desc)
-        column.addArrangedSubview(body)
-        mount(column, in: card)
+        for (gi, group) in groups.enumerated() {
+            let heading = label("\(group.name) · \(group.words.count)", size: 12, weight: .medium, color: theme.text2)
+            section.addArrangedSubview(heading)
+            section.setCustomSpacing(8, after: heading)
+
+            let manual = group.name == SyncedHotWords.manualGroup
+            let chips: [NSView] = group.words.map { word in
+                syncedHotWordTargets.append(word)
+                return makeSyncedHotWordChip(word, manual: manual, tag: syncedHotWordTargets.count - 1)
+            }
+            let grid = AdaptiveGridView(items: chips, rowHeight: 34, spacing: 8, twoColumnsBelow: 480)
+            section.addArrangedSubview(grid)
+            grid.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+            if gi < groups.count - 1 { section.setCustomSpacing(18, after: grid) }
+        }
+        return section
+    }
+
+    /// 同步热词的小词卡：与词条卡同一套样式（圆角描边、来源图标、悬停变底色），高度更紧凑，悬停浮现 ×
+    private func makeSyncedHotWordChip(_ word: String, manual: Bool, tag: Int) -> NSView {
+        let chip = VocabChipView()
+        chip.wantsLayer = true
+        chip.layer?.cornerRadius = 8
+        chip.layer?.borderWidth = 1
+        chip.layer?.setAppearanceBorder(theme.sep)
+        chip.layer?.setAppearanceBackground(theme.card)
+        chip.normalBg = theme.card
+        chip.hoverBg = theme.cardAlt
+        chip.toolTip = word
+
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: manual ? "pencil" : "arrow.triangle.2.circlepath",
+                             accessibilityDescription: manual ? "手动添加" : "自动同步")
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
+        icon.contentTintColor = theme.text3
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let text = label(word, size: 12.5, weight: .medium, color: theme.text)
+        text.lineBreakMode = .byTruncatingTail
+        text.maximumNumberOfLines = 1
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        let remove = makeChipIconButton(symbol: "xmark", tooltip: "删除，之后不会再自动加回",
+                                        action: #selector(blockSyncedHotWordTapped(_:)), tag: tag)
+        remove.image = remove.image?.withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
+        remove.setContentHuggingPriority(.required, for: .horizontal)
+        remove.isHidden = true
+        chip.onHoverChange = { [weak remove] hovering in remove?.isHidden = !hovering }
+
+        let spacer = NSView()
+        spacer.translatesAutoresizingMaskIntoConstraints = false
+        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+
+        let inner = NSStackView()
+        inner.orientation = .horizontal
+        inner.alignment = .centerY
+        inner.spacing = 7
+        inner.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 10)
+        inner.addArrangedSubview(icon)
+        inner.addArrangedSubview(text)
+        inner.addArrangedSubview(spacer)
+        inner.addArrangedSubview(remove)
+        inner.translatesAutoresizingMaskIntoConstraints = false
+        chip.addSubview(inner)
         NSLayoutConstraint.activate([
-            desc.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -40),
-            body.widthAnchor.constraint(equalTo: column.widthAnchor, constant: -40),
+            inner.leadingAnchor.constraint(equalTo: chip.leadingAnchor),
+            inner.trailingAnchor.constraint(equalTo: chip.trailingAnchor),
+            inner.topAnchor.constraint(equalTo: chip.topAnchor),
+            inner.bottomAnchor.constraint(equalTo: chip.bottomAnchor),
         ])
-        return card
+        return chip
+    }
+
+    /// 本地改动：删一个同步热词：从 hot_words 和分组里拿掉、记进 hot_words_blocked（同步脚本不会再加回来），
+    /// 不弹确认（页面没有撤销提示的现成模式，就不加）；重建页面时保留滚动位置，刷新侧栏角标。
+    @objc private func blockSyncedHotWordTapped(_ sender: NSButton) {
+        guard syncedHotWordTargets.indices.contains(sender.tag) else { return }
+        let word = syncedHotWordTargets[sender.tag]
+        config.save(values: SyncedHotWords.blockValues(word, config: config.loadConfig()))
+        rebuildSidebar()
+        invalidateVocabularyKeepingScroll()
+    }
+
+    private func invalidateVocabularyKeepingScroll() {
+        let y = cachedScrolls[.vocabulary]?.contentView.bounds.origin.y ?? 0
+        invalidate(.vocabulary)
+        guard y > 0, let scroll = cachedScrolls[.vocabulary] else { return }
+        scroll.layoutSubtreeIfNeeded()
+        let maxY = max(0, (scroll.documentView?.frame.height ?? 0) - scroll.contentView.bounds.height)
+        scroll.contentView.scroll(to: NSPoint(x: 0, y: min(y, maxY)))
+        scroll.reflectScrolledClipView(scroll.contentView)
     }
 
     @objc private func vocabFilterChanged(_ sender: VPSegmentedControl) {

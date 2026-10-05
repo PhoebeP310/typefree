@@ -111,6 +111,29 @@ public struct ActivityHeatmap: Equatable {
         return max(1, min(maxColumns, n))
     }
 
+    // 本地改动：热力图铺满卡片宽度的排布。格子边长取整（画出来不糊），余下的宽度摊进间距，
+    // 所以最右一列正好贴着右边缘；间距落在 minGap 到约 minGap + 1 之间。
+    public struct GridMetrics: Equatable {
+        public let columns: Int
+        public let cell: CGFloat
+        public let gap: CGFloat
+        /// 整个网格的宽度（= columns * cell + (columns - 1) * gap），铺满时等于传入的 width
+        public var width: CGFloat { CGFloat(columns) * cell + CGFloat(max(0, columns - 1)) * gap }
+    }
+
+    /// 在 width 里放尽量多的周（每格不小于 minCell、最多 maxColumns 列），格子取整、余量进间距，网格正好铺满 width。
+    /// 列数到了上限、格子又已到 maxCell 时（极宽的窗口）才会让间距继续变大，仍然铺满。
+    public static func fillLayout(width: CGFloat, minCell: CGFloat = 12, maxCell: CGFloat = 22,
+                                  minGap: CGFloat = 3, maxColumns: Int = 53) -> GridMetrics {
+        guard width > 0 else { return GridMetrics(columns: 1, cell: minCell, gap: minGap) }
+        let cols = columnsThatFit(width: width, minCell: minCell, gap: minGap, maxColumns: maxColumns)
+        let n = CGFloat(cols)
+        let raw = (width - (n - 1) * minGap) / n
+        let cell = min(maxCell, max(1, raw.rounded(.down)))
+        let gap = cols > 1 ? (width - n * cell) / (n - 1) : 0
+        return GridMetrics(columns: cols, cell: cell, gap: gap)
+    }
+
     /// - Parameters:
     ///   - weeks: 显示几列（周）
     ///   - pageOffset: 往前翻了几页（每页 weeks 周），0 = 最新一页

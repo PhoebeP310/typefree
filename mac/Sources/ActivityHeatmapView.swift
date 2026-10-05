@@ -5,19 +5,21 @@ import VoicePolishCore
 
 /// 本地改动：首页「洞察」热力图（替换原来的「节律」一行圆点 RhythmStripView）。
 /// GitHub 式：每列一周（周一起算，与 App 周统计同口径）、每行一个星期几，最新一周在最右；
-/// 列数按宽度算，最多 26 周，窄窗口时减列；左侧星期标签，列下月份标签，最底下一行左边写悬停那天、右边是「更少 … 更多」图例。
+/// 本地改动：网格铺满卡片内宽：放尽量多的周（格子 12–22pt、间距 3–4pt，最多 53 周，算法见 ActivityHeatmap.fillLayout）；
+/// 左侧星期标签，列下月份标签；最底下一行左边写悬停那天（与网格左缘对齐）、右边是「更少 … 更多」图例（贴卡片内容右缘）。
 /// 深浅按窗口内单日最多字数分 4 档（ActivityRhythm.intensityLevel），颜色沿用原节律圆点那个蓝。
 /// 系统 tooltip 在这里不可靠，悬停信息自己画。
 final class ActivityHeatmapView: NSView {
     /// 与原节律圆点同一个蓝（刻意的，不跟随主题强调色）
     static let accent = NSColor(red: 0.25, green: 0.52, blue: 1.0, alpha: 1)
-    static let maxWeeks = 26
+    static let maxWeeks = 53   // 本地改动：26 → 53，配合铺满宽度
     private static let levelAlphas: [CGFloat] = [0, 0.25, 0.5, 0.75, 1.0]
 
     private let labelWidth: CGFloat = 20     // 左侧星期标签列
-    private let gap: CGFloat = 3
-    private let minCell: CGFloat = 10
-    private let maxCell: CGFloat = 18
+    // 本地改动：格子 10–18 → 12–22，间距随宽度在 3–4 之间（由 fillLayout 算）
+    private let minGap: CGFloat = 3
+    private let minCell: CGFloat = 12
+    private let maxCell: CGFloat = 22
     private let monthRowHeight: CGFloat = 18
     private let legendRowHeight: CGFloat = 18
 
@@ -56,22 +58,20 @@ final class ActivityHeatmapView: NSView {
 
     // MARK: - 尺寸
 
-    private var columnCount: Int {
-        ActivityHeatmap.columnsThatFit(width: bounds.width - labelWidth, minCell: minCell, gap: gap,
-                                       maxColumns: Self.maxWeeks)
+    // 本地改动：列数、格子、间距一起算，网格右缘正好贴视图右缘
+    private var metrics: ActivityHeatmap.GridMetrics {
+        ActivityHeatmap.fillLayout(width: bounds.width - labelWidth, minCell: minCell, maxCell: maxCell,
+                                   minGap: minGap, maxColumns: Self.maxWeeks)
     }
 
-    private var cellSize: CGFloat {
-        let cols = CGFloat(columnCount)
-        let avail = bounds.width - labelWidth
-        guard avail > 0 else { return minCell }
-        return max(minCell, min(maxCell, ((avail - (cols - 1) * gap) / cols).rounded(.down)))
-    }
+    private var columnCount: Int { metrics.columns }
+    private var cellSize: CGFloat { metrics.cell }
+    private var gap: CGFloat { metrics.gap }
 
     private func gridHeight(cell: CGFloat) -> CGFloat { cell * 7 + gap * 6 }
 
     override var intrinsicContentSize: NSSize {
-        let cell = bounds.width > 0 ? cellSize : 14
+        let cell = bounds.width > 0 ? cellSize : minCell
         return NSSize(width: NSView.noIntrinsicMetric,
                       height: gridHeight(cell: cell) + monthRowHeight + 6 + legendRowHeight)
     }
@@ -150,7 +150,8 @@ final class ActivityHeatmapView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         guard let model, !model.columns.isEmpty else { return }
-        let cell = cellSize
+        let m = metrics
+        let cell = m.cell, gap = m.gap
         let radius = max(2, cell * 0.22)
         let small: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 10), .foregroundColor: theme.text3]
 
@@ -190,8 +191,9 @@ final class ActivityHeatmapView: NSView {
             s.draw(at: NSPoint(x: labelWidth + CGFloat(m.column) * (cell + gap), y: monthY))
         }
 
-        // 最底一行：右边图例「更少 ▢▢▢▢▢ 更多」，左边悬停那天
-        let gridRight = labelWidth + CGFloat(model.columns.count) * (cell + gap) - gap
+        // 最底一行：右边图例「更少 ▢▢▢▢▢ 更多」贴卡片内容右缘，左边悬停那天与网格左缘对齐
+        // 本地改动：图例改为按视图右缘（= 卡片内容右缘，网格已铺满）对齐，不再按网格实际宽度
+        let gridRight = bounds.width
         let legendY = monthY + monthRowHeight + 2
         let swatch = min(cell, 11)
         let more = NSAttributedString(string: "更多", attributes: small)
