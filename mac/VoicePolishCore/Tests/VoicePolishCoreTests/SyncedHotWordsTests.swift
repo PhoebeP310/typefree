@@ -80,3 +80,28 @@ final class SyncedHotWordsTests: XCTestCase {
         XCTAssertEqual(noGroups["hot_words_blocked"] as? [String], ["A"])
     }
 }
+
+// 本地改动：同步热词里去掉已是词库词条的词
+final class SyncedHotWordsExcludingTests: XCTestCase {
+    func testExcludingDropsVocabTermsAndEmptyGroups() {
+        let groups = [SyncedHotWords.Group(name: "业务词", words: ["帖文", "Swift", "文档"]),
+                      SyncedHotWords.Group(name: "同事", words: ["Alice"])]
+        let r = SyncedHotWords.excluding(groups, terms: [" 帖文 ", "swift", "alice"])
+        XCTAssertEqual(r, [SyncedHotWords.Group(name: "业务词", words: ["文档"])],
+                       "忽略大小写和首尾空白；组被去空后整组去掉")
+    }
+
+    func testExcludingWithNoTermsIsIdentity() {
+        let groups = [SyncedHotWords.Group(name: "业务词", words: ["帖文"])]
+        XCTAssertEqual(SyncedHotWords.excluding(groups, terms: []), groups)
+        XCTAssertEqual(SyncedHotWords.excluding(groups, terms: ["  "]), groups)
+    }
+
+    func testExcludingThenFilterStillWorks() {
+        let groups = [SyncedHotWords.Group(name: "手动添加", words: ["A", "B"]),
+                      SyncedHotWords.Group(name: "业务词", words: ["C"])]
+        let deduped = SyncedHotWords.excluding(groups, terms: ["b"])
+        XCTAssertEqual(SyncedHotWords.filter(deduped, by: .manual).first?.words, ["A"])
+        XCTAssertEqual(SyncedHotWords.filter(deduped, by: .autoLearned).map(\.name), ["业务词"])
+    }
+}

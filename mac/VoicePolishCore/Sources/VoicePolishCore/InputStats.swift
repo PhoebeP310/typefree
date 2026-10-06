@@ -163,13 +163,14 @@ public final class InputStats {
         return (hit.reduce(0) { $0 + $1.charCount }, hit.reduce(0) { $0 + $1.sessionCount })
     }
 
-    // 本地改动：「上周同期」卡片的副标题：本周至今 vs 上周同期
-    public static func weekOverWeekText(current: Int, previous: Int) -> String {
-        guard previous > 0 else { return "上周同期没有使用" }
+    // 本地改动：首页「本周」卡片的副标题：本周至今 vs 上周同期。
+    // 上周同期为 0 时没有可比的基数，返回 nil，界面退回显示「N 次」。
+    public static func weekOverWeekText(current: Int, previous: Int) -> String? {
+        guard previous > 0 else { return nil }
         let pct = Int((Double(current - previous) / Double(previous) * 100).rounded())
-        if pct > 0 { return "本周 ↑\(pct)%" }
-        if pct < 0 { return "本周 ↓\(-pct)%" }
-        return "本周持平"
+        if pct > 0 { return "比上周同期 ↑\(pct)%" }
+        if pct < 0 { return "比上周同期 ↓\(-pct)%" }
+        return "与上周同期持平"
     }
 
     public func currentWeekTotal() -> (chars: Int, sessions: Int) {

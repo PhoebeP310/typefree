@@ -14,6 +14,25 @@ public enum AppUsageSplit {
     }
 
     public static let otherName = "其他"
+
+    // 本地改动：首页按应用卡片的显示名。进程名有的是全小写（cursor）或大小写不对（Wea），
+    // 小映射表优先；不在表里、又是全小写英文的，首字母大写；其余原样。
+    static let displayNames: [String: String] = [
+        "wea": "WEA",
+        "wechat": "WeChat",
+        "qq": "QQ",
+        "iterm2": "iTerm2",
+        "dingtalk": "DingTalk",
+        "vscode": "VS Code",
+    ]
+
+    public static func displayName(_ app: String) -> String {
+        if let mapped = displayNames[app.lowercased()] { return mapped }
+        let isLowerASCII = !app.isEmpty && app.unicodeScalars.allSatisfy { $0.isASCII }
+            && app == app.lowercased() && app.contains(where: { $0.isLetter })
+        guard isLowerASCII else { return app }
+        return app.prefix(1).uppercased() + app.dropFirst()
+    }
     public static let unknownName = "未知应用"
 
     /// - Parameters:

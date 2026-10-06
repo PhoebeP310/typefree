@@ -28,7 +28,8 @@ class StatusBarController {
         // 工单 #17：加词不用再进主窗口翻到词库页
         menu.addItem(withTitle: "个人词库…", action: #selector(openVocabulary), keyEquivalent: "")
             .target = self
-        menu.addItem(withTitle: "检查更新…", action: #selector(AppDelegate.checkForUpdates(_:)), keyEquivalent: "")
+        // 本地改动：只打开上游 Releases 页，不再叫「检查更新」
+        menu.addItem(withTitle: "查看作者新版本", action: #selector(AppDelegate.checkForUpdates(_:)), keyEquivalent: "")
             .target = delegate
         menu.addItem(NSMenuItem.separator())
         menu.addItem(micItem)

@@ -83,6 +83,17 @@ public enum SyncedHotWords {
         }
     }
 
+    /// 本地改动：去掉已经是词库词条（term_corrections 的 target）的热词，免得同一个词在页面上出现两次；
+    /// 去完为空的组一并去掉。比较忽略大小写和首尾空白。
+    public static func excluding(_ groups: [Group], terms: [String]) -> [Group] {
+        let taken = Set(terms.map(norm).filter { !$0.isEmpty })
+        guard !taken.isEmpty else { return groups }
+        return groups.compactMap { g in
+            let words = g.words.filter { !taken.contains(norm($0)) }
+            return words.isEmpty ? nil : Group(name: g.name, words: words)
+        }
+    }
+
     public struct BlockResult: Equatable {
         public let hotWords: [String]
         public let groups: [String: [String]]?

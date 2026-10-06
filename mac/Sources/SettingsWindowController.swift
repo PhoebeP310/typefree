@@ -596,22 +596,25 @@ private final class VocabChipView: NSView {
     }
 }
 
-// 本地改动：等宽自适应网格（词库页同步热词用）：宽度够就 3 列，窄于阈值退成 2 列；
-// 子视图固定行高，由这里手动排 frame，高度随行数走 intrinsicContentSize。
-private final class AdaptiveGridView: NSView {
+// 本地改动：流式排布容器（词库页同步热词小标签用，替换原来的等宽 3 列 AdaptiveGridView）：
+// 每个子视图按自己的宽度从左往右排，放不下就换行（算法见 VoicePolishCore 的 FlowLayout，有单测）；
+// 子视图 frame 由这里手动排，高度随行数走 intrinsicContentSize。
+private final class FlowView: NSView {
     private let items: [NSView]
-    private let rowHeight: CGFloat
+    private let widths: [CGFloat]
+    private let itemHeight: CGFloat
     private let spacing: CGFloat
-    private let twoColumnsBelow: CGFloat
-    private var lastColumns = 0
+    private let lineSpacing: CGFloat
+    private var lastHeight: CGFloat = -1
 
     override var isFlipped: Bool { true }
 
-    init(items: [NSView], rowHeight: CGFloat, spacing: CGFloat, twoColumnsBelow: CGFloat) {
+    init(items: [NSView], widths: [CGFloat], itemHeight: CGFloat, spacing: CGFloat, lineSpacing: CGFloat) {
         self.items = items
-        self.rowHeight = rowHeight
+        self.widths = widths
+        self.itemHeight = itemHeight
         self.spacing = spacing
-        self.twoColumnsBelow = twoColumnsBelow
+        self.lineSpacing = lineSpacing
         super.init(frame: .zero)
         translatesAutoresizingMaskIntoConstraints = false
         for v in items {
@@ -621,19 +624,22 @@ private final class AdaptiveGridView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private var columns: Int { bounds.width > 0 && bounds.width < twoColumnsBelow ? 2 : 3 }
-
-    private var rows: Int { (items.count + columns - 1) / columns }
+    private func compute(width: CGFloat) -> FlowLayout.Result {
+        FlowLayout.layout(widths: widths, maxWidth: width, itemHeight: itemHeight,
+                          spacing: spacing, lineSpacing: lineSpacing)
+    }
 
     override var intrinsicContentSize: NSSize {
-        let r = CGFloat(rows)
-        return NSSize(width: NSView.noIntrinsicMetric, height: max(0, r * rowHeight + (r - 1) * spacing))
+        // 还没拿到宽度时先按一行估，拿到宽度后再按实际换行数更新
+        let h = bounds.width > 0 ? compute(width: bounds.width).height : (items.isEmpty ? 0 : itemHeight)
+        return NSSize(width: NSView.noIntrinsicMetric, height: h)
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         super.setFrameSize(newSize)
-        if columns != lastColumns {
-            lastColumns = columns
+        let h = compute(width: newSize.width).height
+        if h != lastHeight {
+            lastHeight = h
             invalidateIntrinsicContentSize()
         }
         needsLayout = true
@@ -641,14 +647,8 @@ private final class AdaptiveGridView: NSView {
 
     override func layout() {
         super.layout()
-        let cols = columns
-        let w = (bounds.width - CGFloat(cols - 1) * spacing) / CGFloat(cols)
-        guard w > 0 else { return }
-        for (i, v) in items.enumerated() {
-            let col = i % cols, row = i / cols
-            v.frame = NSRect(x: CGFloat(col) * (w + spacing), y: CGFloat(row) * (rowHeight + spacing),
-                             width: w, height: rowHeight)
-        }
+        guard bounds.width > 0 else { return }
+        for (v, f) in zip(items, compute(width: bounds.width).frames) { v.frame = f }
     }
 }
 
@@ -2205,35 +2205,33 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.setCustomSpacing(16, after: hero)
 
         // Stats
-        // 本地改动：四张卡（今日/本周/本月/累计）改为三张：今日 / 本周 / 上周同期（副标题给本周环比）
+        // 本地改动：首页指标收成一行四张：今日 / 本周（副标题给环比）/ 平均口述速度 / 总口述时间。
+        // 原「上周同期」卡和「洞察」里的「累计口述字数」卡去掉（累计挪到热力图卡片顶部那行）。
         let stats = InputStats.shared
         let today = stats.today()
         let week = stats.currentWeekTotal()
         let lastWeek = stats.lastWeekSamePeriodTotal()
-        let statsGrid = makeStatsGrid([
-            ("今日", today.charCount, "\(today.sessionCount) 次"),
-            ("本周", week.chars, "\(week.sessions) 次"),
-            ("上周同期", lastWeek.chars, InputStats.weekOverWeekText(current: week.chars, previous: lastWeek.chars)),
+        let records = stats.allDailyRecords()
+        let totals = DictationInsights.totals(records: records)
+        let totalSessions = records.reduce(0) { $0 + $1.sessionCount }
+        let metricRow = makeMetricRow([
+            ("今日", [.init(formatNumber(today.charCount), "字")], "\(today.sessionCount) 次"),
+            ("本周", [.init(formatNumber(week.chars), "字")],
+             InputStats.weekOverWeekText(current: week.chars, previous: lastWeek.chars) ?? "\(week.sessions) 次"),
+            ("平均口述速度", [.init(totals.speedPerMinute.map { formatNumber($0) } ?? "—", "字/分钟")], "按录音时长计算"),
+            ("总口述时间", DictationInsights.durationParts(ms: totals.durationMs), "共 \(formatNumber(totalSessions)) 次"),
         ])
-        stack.addArrangedSubview(statsGrid)
+        stack.addArrangedSubview(metricRow)
 
         // 本地改动：按应用拆分（今天没数据就看本周，本周也没有就不显示）
+        var lastView: NSView = metricRow
         if let appCard = makeAppSplitCard(stats: stats) {
-            stack.setCustomSpacing(10, after: statsGrid)
+            stack.setCustomSpacing(10, after: metricRow)
             stack.addArrangedSubview(appCard)
-            stack.setCustomSpacing(24, after: appCard)
-        } else {
-            stack.setCustomSpacing(24, after: statsGrid)
+            lastView = appCard
         }
-
-        // 本地改动：原「节律」一行圆点卡片换成「洞察」：三张指标（累计字数 / 平均速度 / 总时长）+ 热力图
-        let records = stats.allDailyRecords()
-        let insightsTitle = sectionTitle("洞察")
-        stack.addArrangedSubview(insightsTitle)
-        stack.setCustomSpacing(8, after: insightsTitle)
-        let insightTiles = makeInsightTiles(records: records)
-        stack.addArrangedSubview(insightTiles)
-        stack.setCustomSpacing(10, after: insightTiles)
+        // 本地改动：去掉单独的「洞察」标题，热力图卡片直接接在下面（卡片顶部那行已写明累计 / 活跃 / 连续）
+        stack.setCustomSpacing(10, after: lastView)
         let heatmapCard = makeHeatmapCard(records: records)
         stack.addArrangedSubview(heatmapCard)
         stack.setCustomSpacing(24, after: heatmapCard)
@@ -2326,14 +2324,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 swatch.heightAnchor.constraint(equalToConstant: 8),
             ])
 
-            let name = label(s.app, size: 12, weight: .regular, color: theme.text2)
+            let name = label(AppUsageSplit.displayName(s.app), size: 12, weight: .regular, color: theme.text2)   // 本地改动：wea → WEA 等显示名
             name.maximumNumberOfLines = 1
             name.lineBreakMode = .byTruncatingTail
             name.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             name.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
             let chars = label("\(formatNumber(s.chars)) 字", size: 12, weight: .regular, color: theme.text)
-            chars.font = monoFont(size: 12, weight: .regular)
+            chars.font = digitFont(size: 12, weight: .regular)   // 本地改动：等宽数字
             chars.maximumNumberOfLines = 1
             chars.lineBreakMode = .byClipping
             chars.setContentCompressionResistancePriority(.required, for: .horizontal)
@@ -2341,7 +2339,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
             let pctValue = Int((Double(s.chars) / Double(total) * 100).rounded())
             let pct = label(pctValue == 0 ? "<1%" : "\(pctValue)%", size: 12, weight: .regular, color: theme.text3)
-            pct.font = monoFont(size: 12, weight: .regular)
+            pct.font = digitFont(size: 12, weight: .regular)
             pct.alignment = .right
             pct.maximumNumberOfLines = 1
             pct.lineBreakMode = .byClipping
@@ -2366,73 +2364,36 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         return card
     }
 
-    // 本地改动：「洞察」三张指标卡：累计口述字数 / 平均口述速度 / 总口述时间（不做「节省时间」）。
-    // 时长来自日统计里的 durationMs（录音时长），速度只按有时长的日子算，见 DictationInsights.totals。
-    private func makeInsightTiles(records: [DailyRecord]) -> NSView {
-        let t = DictationInsights.totals(records: records)
-        let speed: [DictationInsights.ValuePart] = [.init(t.speedPerMinute.map { "\($0)" } ?? "—", "每分钟字数")]
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .top
-        row.distribution = .fillEqually
-        row.spacing = 10
-        row.addArrangedSubview(makeInsightTile(parts: [.init(DictationInsights.compactCount(t.chars), "字")], caption: "口述字数"))
-        row.addArrangedSubview(makeInsightTile(parts: speed, caption: "平均口述速度"))
-        row.addArrangedSubview(makeInsightTile(parts: DictationInsights.durationParts(ms: t.durationMs), caption: "总口述时间"))
-        return row
-    }
-
-    private func makeInsightTile(parts: [DictationInsights.ValuePart], caption: String) -> NSView {
-        let card = makeCard()
-        let valueRow = NSStackView()
-        valueRow.orientation = .horizontal
-        valueRow.alignment = .lastBaseline
-        valueRow.spacing = 3
-        for (i, part) in parts.enumerated() {
-            let big = label(part.value, size: 26, weight: .bold, color: theme.text)
-            big.font = monoFont(size: 26, weight: .bold)
-            big.maximumNumberOfLines = 1
-            big.lineBreakMode = .byClipping
-            let unit = label(part.unit, size: 12, weight: .regular, color: theme.text3)
-            unit.maximumNumberOfLines = 1
-            unit.lineBreakMode = .byClipping
-            valueRow.addArrangedSubview(big)
-            valueRow.addArrangedSubview(unit)
-            if i < parts.count - 1 { valueRow.setCustomSpacing(8, after: unit) }
-        }
-        let cap = label(caption, size: 11, weight: .regular, color: theme.text3)
-
-        let stack = NSStackView()
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 6
-        stack.edgeInsets = NSEdgeInsets(top: 14, left: 18, bottom: 14, right: 18)
-        stack.addArrangedSubview(valueRow)
-        stack.addArrangedSubview(cap)
-        mount(stack, in: card)
-        return card
-    }
-
-    // 本地改动：热力图卡片：顶部三个数（活跃天数 / 当前连续 / 最长连续，沿用 ActivityRhythm 的连续算法）
-    // + 右上角翻页箭头（每次翻一屏的周数），下面是 ActivityHeatmapView。
+    // 本地改动：热力图卡片：顶部一行小字统计「累计 N 字 · 活跃 N 天 · 连续 N 天 · 最长 N 天」
+    // （数字加重、标签次要色；连续算法沿用 ActivityRhythm），同一行右侧是翻页箭头（每次翻一屏的周数），下面是 ActivityHeatmapView。
     private weak var heatmapView: ActivityHeatmapView?
 
     private func makeHeatmapCard(records: [DailyRecord]) -> NSView {
         let card = makeCard()
         let rhythm = ActivityRhythm.compute(records: records, days: 1)
+        let totalChars = records.reduce(0) { $0 + $1.charCount }
 
-        func metric(_ value: Int, _ caption: String) -> NSView {
-            let v = NSStackView()
-            v.orientation = .vertical
-            v.alignment = .leading
-            v.spacing = 2
-            let big = label(formatNumber(value), size: 20, weight: .bold, color: theme.text)
-            big.font = monoFont(size: 20, weight: .bold)
-            big.maximumNumberOfLines = 1
-            v.addArrangedSubview(big)
-            v.addArrangedSubview(label(caption, size: 11, weight: .regular, color: theme.text3))
-            return v
+        let summary = NSMutableAttributedString()
+        let labelAttrs: [NSAttributedString.Key: Any] = [.font: NSFont.systemFont(ofSize: 12), .foregroundColor: theme.text3]
+        let numberAttrs: [NSAttributedString.Key: Any] = [.font: digitFont(size: 13, weight: .semibold), .foregroundColor: theme.text]
+        let items: [(String, String, String)] = [
+            ("累计", formatNumber(totalChars), "字"),
+            ("活跃", formatNumber(rhythm.activeDays), "天"),
+            ("连续", formatNumber(rhythm.currentStreak), "天"),
+            ("最长", formatNumber(rhythm.bestStreak), "天"),
+        ]
+        for (i, item) in items.enumerated() {
+            if i > 0 { summary.append(NSAttributedString(string: "  ·  ", attributes: labelAttrs)) }
+            summary.append(NSAttributedString(string: item.0 + " ", attributes: labelAttrs))
+            summary.append(NSAttributedString(string: item.1, attributes: numberAttrs))
+            summary.append(NSAttributedString(string: " " + item.2, attributes: labelAttrs))
         }
+        let summaryLabel = NSTextField(labelWithAttributedString: summary)
+        summaryLabel.maximumNumberOfLines = 1
+        summaryLabel.lineBreakMode = .byTruncatingTail
+        summaryLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        summaryLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
+        summaryLabel.setAccessibilityLabel("累计 \(totalChars) 字，活跃 \(rhythm.activeDays) 天，当前连续 \(rhythm.currentStreak) 天，最长连续 \(rhythm.bestStreak) 天")
 
         func arrow(_ symbol: String, _ tip: String, _ action: Selector) -> NSButton {
             let b = NSButton()
@@ -2448,11 +2409,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         let header = NSStackView()
         header.orientation = .horizontal
-        header.alignment = .top
-        header.spacing = 32
-        header.addArrangedSubview(metric(rhythm.activeDays, "活跃天数"))
-        header.addArrangedSubview(metric(rhythm.currentStreak, "当前连续天数"))
-        header.addArrangedSubview(metric(rhythm.bestStreak, "最长连续天数"))
+        header.alignment = .centerY
+        header.spacing = 12
+        header.addArrangedSubview(summaryLabel)
         let spacer = NSView()
         spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
         header.addArrangedSubview(spacer)
@@ -2476,9 +2435,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let column = NSStackView()
         column.orientation = .vertical
         column.alignment = .leading
-        column.spacing = 16
+        column.spacing = 14
         column.translatesAutoresizingMaskIntoConstraints = false
-        column.edgeInsets = NSEdgeInsets(top: 16, left: 24, bottom: 14, right: 24)
+        column.edgeInsets = NSEdgeInsets(top: 14, left: 24, bottom: 14, right: 24)
         column.addArrangedSubview(header)
         column.addArrangedSubview(grid)
         mount(column, in: card)
@@ -2528,23 +2487,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         leftStack.addArrangedSubview(desc)
 
         // 三个鼠标 / 口令用法一眼看到（3.0 新功能），点哪个看哪个的演示
-        // 本地改动：口令都放在这一块，两行：第一行原有的说话 / 翻译，第二行格式口令（改成要点 / 结论先行）
-        func hintRow(_ views: [NSView]) -> NSStackView {
-            let r = NSStackView(views: views)
-            r.orientation = .horizontal
-            r.alignment = .centerY
-            r.spacing = 28
-            return r
-        }
-        let gestures = NSStackView(views: [
-            hintRow([makeGestureHint(key: "输入框里按住鼠标", label: "说话", feature: .mouseHold),
-                     makeGestureHint(key: "结尾说「用英文」", label: "翻译", feature: .translation)]),
-            hintRow([makeGestureHint(key: "结尾说「改成要点」", label: "编号要点", feature: nil),
-                     makeGestureHint(key: "结尾说「结论先行」", label: "结论放第一句", feature: nil)]),
+        // 本地改动：口令都放在这一块，2×2 网格（NSGridView）：第二列在两行里起点对齐；
+        // 第一行原有的说话 / 翻译（可点看演示），第二行格式口令（改成要点 / 结论先行，只展示）
+        let gestures = NSGridView(views: [
+            [makeGestureHint(key: "输入框里按住鼠标", label: "说话", feature: .mouseHold),
+             makeGestureHint(key: "结尾说「用英文」", label: "翻译", feature: .translation)],
+            [makeGestureHint(key: "结尾说「改成要点」", label: "编号要点", feature: nil),
+             makeGestureHint(key: "结尾说「结论先行」", label: "结论放第一句", feature: nil)],
         ])
-        gestures.orientation = .vertical
-        gestures.alignment = .leading
-        gestures.spacing = 10
+        gestures.translatesAutoresizingMaskIntoConstraints = false
+        gestures.columnSpacing = 28
+        gestures.rowSpacing = 10
+        gestures.xPlacement = .leading
+        gestures.rowAlignment = .none
+        gestures.yPlacement = .center
 
         let main = NSStackView()
         main.orientation = .vertical
@@ -2767,35 +2723,47 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         alert.runModal()
     }
 
-    private func makeStatsGrid(_ items: [(String, Int, String)]) -> NSView {
+    // 本地改动：首页一行四张指标卡（替换原 makeStatsGrid / makeStatCard 和「洞察」三张小卡）。
+    // 数字用系统字体 + 等宽数字（全等宽字体里的逗号太宽）；数字绝不换行，窄窗口下宁可裁切。
+    private func makeMetricRow(_ items: [(String, [DictationInsights.ValuePart], String)]) -> NSView {
         let row = NSStackView()
         row.orientation = .horizontal
         row.alignment = .top
         row.distribution = .fillEqually
         row.spacing = 10
         for item in items {
-            row.addArrangedSubview(makeStatCard(label: item.0, value: item.1, sub: item.2))
+            row.addArrangedSubview(makeMetricCard(label: item.0, parts: item.1, sub: item.2))
         }
         return row
     }
 
-    private func makeStatCard(label labelText: String, value: Int, sub subText: String) -> NSView {
+    private func makeMetricCard(label labelText: String, parts: [DictationInsights.ValuePart], sub subText: String) -> NSView {
         let card = makeCard()
 
         let eyebrow = label(labelText, size: 11, weight: .medium, color: theme.text3)
-        let big = label(formatNumber(value), size: 30, weight: .bold, color: theme.text)
-        big.font = monoFont(size: 30, weight: .bold)
-        big.maximumNumberOfLines = 1          // 数字绝不换行（窄窗口下宁可整体缩小，不断成两行）
-        big.lineBreakMode = .byClipping
-        let unit = label("字", size: 13, weight: .regular, color: theme.text3)
-        let sub = label(subText, size: 11, weight: .regular, color: theme.text3)
+        eyebrow.maximumNumberOfLines = 1
+        eyebrow.lineBreakMode = .byTruncatingTail
 
         let valueRow = NSStackView()
         valueRow.orientation = .horizontal
         valueRow.alignment = .lastBaseline
         valueRow.spacing = 3
-        valueRow.addArrangedSubview(big)
-        valueRow.addArrangedSubview(unit)
+        for (i, part) in parts.enumerated() {
+            let big = label(part.value, size: 26, weight: .bold, color: theme.text)
+            big.font = digitFont(size: 26, weight: .bold)
+            big.maximumNumberOfLines = 1          // 数字绝不换行（窄窗口下宁可裁切，不断成两行）
+            big.lineBreakMode = .byClipping
+            let unit = label(part.unit, size: 12, weight: .regular, color: theme.text3)
+            unit.maximumNumberOfLines = 1
+            unit.lineBreakMode = .byClipping
+            valueRow.addArrangedSubview(big)
+            valueRow.addArrangedSubview(unit)
+            if i < parts.count - 1 { valueRow.setCustomSpacing(6, after: unit) }
+        }
+
+        let sub = label(subText, size: 11, weight: .regular, color: theme.text3)
+        sub.maximumNumberOfLines = 1
+        sub.lineBreakMode = .byTruncatingTail
 
         let stack = NSStackView()
         stack.orientation = .vertical
@@ -3933,10 +3901,14 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         text.alignment = .leading
         text.spacing = 6
         text.addArrangedSubview(label(title, size: 16, weight: .semibold, color: theme.text))
-        let desc = label(summary, size: 12.5, weight: .regular, color: theme.text3)
-        desc.maximumNumberOfLines = 0
+        // 本地改动：说明文字用按实际宽度折行的 WrappingLabel，并让它撑满文字列；
+        // 原来右侧有开关时，文字列和一个空占位视图抢宽度，说明被挤成窄窄的三行（「鼠标长按说话」卡片）。
+        let desc = makeWrappingLabel(summary, size: 12.5, weight: .regular, color: theme.text3)
+        desc.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         text.addArrangedSubview(desc)
+        desc.widthAnchor.constraint(equalTo: text.widthAnchor).isActive = true
         text.setHuggingPriority(.defaultLow, for: .horizontal)
+        text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let header = NSStackView()
         header.orientation = .horizontal
@@ -3945,7 +3917,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         header.spacing = 20
         header.addArrangedSubview(text)
         if let control {
-            header.addArrangedSubview(NSView())
+            control.setContentHuggingPriority(.required, for: .horizontal)
+            control.setContentCompressionResistancePriority(.required, for: .horizontal)
             header.addArrangedSubview(control)
         }
         column.addArrangedSubview(header)
@@ -4135,12 +4108,13 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private static let appearanceOptions: [MainWindowAppearance] = [.system, .light, .dark]
 
-    /// 外观：主窗口和问 AI 面板跟随系统 / 浅色 / 深色。录音胶囊等其余窗口仍是浅色。
+    /// 外观：主窗口跟随系统 / 浅色 / 深色。录音胶囊等其余窗口仍是浅色。
     private func makeAppearanceCard() -> NSView {
         let card = makeCard()
 
         let title = label("深色模式", size: 14, weight: .medium, color: theme.text)
-        let desc = label("选「跟随系统」时，Mac 切到深色（包括晚上自动切换），主窗口和问 AI 面板也跟着变深。",
+        // 本地改动：问 AI 面板已下线，说明里不再提
+        let desc = label("选「跟随系统」时，Mac 切到深色（包括晚上自动切换），主窗口也跟着变深。",
                          size: 12, weight: .regular, color: theme.text3)
         desc.maximumNumberOfLines = 0
 
@@ -4201,22 +4175,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.addArrangedSubview(desc)
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
 
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let row = NSStackView()
-        row.orientation = .horizontal
-        row.alignment = .centerY
-        row.distribution = .fill
-        row.spacing = 16
-        row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
-        row.addArrangedSubview(textStack)
-        row.addArrangedSubview(spacer)
-        row.addArrangedSubview(toggle)
-
         // 本地改动：声音样式可选（原来只能改 config 的 cue_sound_style），选中就切过去并试听一下；
-        // 9 种一排放不下，用下拉，名称前缀区分「乐音 / 敲击」两组
+        // 9 种一排放不下，用下拉，名称前缀区分「乐音 / 敲击」两组。
+        // 本地改动：下拉不再单独占满一整行，改成固定宽度放在开关左边，与「深色模式」「麦克风」行一样控件靠右
         let items = CueSound.Style.allCases.map { st in
             VPDropdown.Item(value: st.rawValue, title: (st.isPercussive ? "敲击 · " : "乐音 · ") + st.displayName)
         }
@@ -4226,24 +4187,28 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                              textColor: theme.text, chevronColor: theme.text3,
                              warnColor: theme.danger, mutedColor: theme.text3)
         seg.setAccessibilityLabel("提示音样式")
+        seg.toolTip = "提示音样式"
         seg.onSelect = { [weak self] value in
             self?.config.save(value: value, forKey: CuePlayer.styleKey)
             CuePlayer.shared.play(.start, force: true)   // 选了就响一下，不用去录音才听得到
         }
+        seg.translatesAutoresizingMaskIntoConstraints = false
+        seg.widthAnchor.constraint(equalToConstant: 170).isActive = true
+        seg.setContentHuggingPriority(.required, for: .horizontal)
+        seg.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        let col = NSStackView()
-        col.orientation = .vertical
-        col.alignment = .leading
-        col.spacing = 0
-        col.addArrangedSubview(row)
-        col.addArrangedSubview(seg)
-        row.widthAnchor.constraint(equalTo: col.widthAnchor).isActive = true
-        seg.leadingAnchor.constraint(equalTo: col.leadingAnchor, constant: 20).isActive = true
-        seg.trailingAnchor.constraint(equalTo: col.trailingAnchor, constant: -20).isActive = true
-        col.setCustomSpacing(0, after: row)
-        col.edgeInsets = NSEdgeInsets(top: 0, left: 0, bottom: 16, right: 0)
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.distribution = .fill
+        row.spacing = 16
+        row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        row.addArrangedSubview(textStack)
+        row.addArrangedSubview(seg)
+        row.addArrangedSubview(toggle)
+        row.setCustomSpacing(14, after: seg)
 
-        mount(col, in: card)
+        mount(row, in: card)
         return card
     }
 
@@ -4444,15 +4409,20 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             stack.setCustomSpacing(14, after: routeCard)
         }
 
-        // Tutorial banner
-        let tutorial = makeTutorialBanner()
-        stack.addArrangedSubview(tutorial)
-        stack.setCustomSpacing(12, after: tutorial)
+        // 本地改动：识别已配置好时，教程横幅和推荐搭配横幅都不再显示，只在未配置时出现
+        if !CloudASRTranscriber().isConfigured() {
+            // Tutorial banner
+            let tutorial = makeTutorialBanner()
+            stack.addArrangedSubview(tutorial)
+            stack.setCustomSpacing(12, after: tutorial)
 
-        // 推荐组合横幅：新用户不知道怎么搭时照抄即可（样式与教程横幅同款，墨黑小标签突出）
-        let combo = makeRecommendedComboBanner()
-        stack.addArrangedSubview(combo)
-        stack.setCustomSpacing(20, after: combo)
+            // 推荐组合横幅：新用户不知道怎么搭时照抄即可（样式与教程横幅同款，墨黑小标签突出）
+            let combo = makeRecommendedComboBanner()
+            stack.addArrangedSubview(combo)
+            stack.setCustomSpacing(20, after: combo)
+        } else if let last = stack.arrangedSubviews.last {
+            stack.setCustomSpacing(20, after: last)
+        }
 
         // ① 语音识别 + ② 语音优化：左右并列，体现"识别 → 优化"的顺序，也填满横向空间。
         // 每张卡片外套一层"卡片 + 底部弹性占位"，矮卡被拉高时多余高度由占位吸收，内容不被撑开。
@@ -5314,7 +5284,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private func makeOutputLanguageCommandRow() -> NSView {
         let title = label("语音口令", size: 13, weight: .medium, color: theme.text)
-        let desc = label("说「用英文」或「翻译成日文」，临时切换本次输出。", size: 12, weight: .regular, color: theme.text3)
+        // 本地改动：口令说明补上格式口令
+        let desc = label("说「用英文」「改成要点」「结论先行」，临时调整本次输出。", size: 12, weight: .regular, color: theme.text3)
         desc.maximumNumberOfLines = 0
         let master = VPToggle(theme: theme, target: self, action: #selector(outputLanguageCommandEnabledChanged(_:)))
         master.setOn(config.bool(forKey: OutputLanguage.commandEnabledConfigKey, defaultValue: true), animated: false)
@@ -6615,18 +6586,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.addArrangedSubview(quickAdd)
         stack.setCustomSpacing(20, after: quickAdd)
 
-        // 本地改动：自动同步的热词按 hot_words_groups 分组，和词条一起受下面的筛选控制
+        // 本地改动：自动同步的热词按 hot_words_groups 分组，和词条一起受下面的筛选控制。
+        // 已经是词库词条（term_corrections 的 target）的词不在热词区重复显示（如「帖文」出现两次），去空的组一并去掉；
+        // 标题里的总数是去重后的个数（与页面上实际能看到的词对得上，不受筛选影响）。
         let json = config.loadConfig()
-        let hotGroups = SyncedHotWords.groups(hotWords: json[SyncedHotWords.hotWordsKey] as? [String] ?? [],
-                                              groupMap: json[SyncedHotWords.groupsKey] as? [String: [String]])
+        let hotGroups = SyncedHotWords.excluding(
+            SyncedHotWords.groups(hotWords: json[SyncedHotWords.hotWordsKey] as? [String] ?? [],
+                                  groupMap: json[SyncedHotWords.groupsKey] as? [String: [String]]),
+            terms: vocabularyEntries.map(\.target))
         let visibleHotGroups = SyncedHotWords.filter(hotGroups, by: SyncedHotWords.Filter(rawValue: vocabFilter) ?? .all)
 
         // 词条网格（含筛选）
-        // 本地改动：只有同步热词、没有词条时也显示筛选
+        // 本地改动：只有同步热词、没有词条时也显示筛选；筛选紧贴在它控制的两块列表（词条 + 同步热词）上面
+        var lastView: NSView = quickAdd
         if vocabularyEntries.isEmpty && hotGroups.isEmpty {
             let empty = makeEmptyState("还没有词。在上面输入一个常说的人名、产品名试试。")
             stack.addArrangedSubview(empty)
-            stack.setCustomSpacing(20, after: empty)
+            lastView = empty
         } else {
             let seg = VPSegmentedControl(
                 labels: ["所有", "自动学习", "手动添加"],
@@ -6642,6 +6618,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             seg.widthAnchor.constraint(equalToConstant: 280).isActive = true
             stack.addArrangedSubview(seg)
             stack.setCustomSpacing(14, after: seg)
+            lastView = seg
 
             let visible: [(index: Int, entry: VocabularyEntry)] = vocabularyEntries.enumerated()
                 .filter { item in
@@ -6657,31 +6634,35 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
                 let empty = label(vocabFilter == 1 ? "还没有自动学到的词。" : "还没有手动添加的词。",
                                   size: 13, weight: .regular, color: theme.text3)
                 stack.addArrangedSubview(empty)
-                stack.setCustomSpacing(20, after: empty)
+                lastView = empty
             } else if !visible.isEmpty {
                 let grid = makeVocabGrid(visible)
                 stack.addArrangedSubview(grid)
-                stack.setCustomSpacing(20, after: grid)
+                lastView = grid
+            }
+
+            // 本地改动：自动同步的热词，按来源分组的流式小标签（为空或筛选后为空不显示）
+            if let synced = makeSyncedHotWordsSection(groups: visibleHotGroups,
+                                                      total: hotGroups.reduce(0) { $0 + $1.words.count }) {
+                stack.setCustomSpacing(visible.isEmpty ? 14 : 28, after: lastView)
+                stack.addArrangedSubview(synced)
+                lastView = synced
+            } else {
+                syncedHotWordTargets = []
             }
         }
 
-        // 词库相关开关
+        // 本地改动：词库相关开关挪到页面最下面，不再隔在筛选和列表之间
+        stack.setCustomSpacing(32, after: lastView)
         let autoLearn = makeAutoLearnCard()
         stack.addArrangedSubview(autoLearn)
         stack.setCustomSpacing(8, after: autoLearn)
         let builtinCard = makeBuiltinHotWordsCard()
         stack.addArrangedSubview(builtinCard)
-
-        // 本地改动：自动同步的热词，按来源分组的小词卡网格（为空或筛选后为空不显示）
-        if let synced = makeSyncedHotWordsSection(groups: visibleHotGroups,
-                                                  total: hotGroups.reduce(0) { $0 + $1.words.count }) {
-            stack.setCustomSpacing(28, after: builtinCard)
-            stack.addArrangedSubview(synced)
-        }
     }
 
     // 本地改动：「自动同步的热词」区块（替换原来把 hot_words 用「、」连成一大段的只读卡片）：
-    // 标题 + 说明，下面每个来源一节「组名 · 个数」+ 3 列小词卡（窄窗口 2 列），悬停词卡出现 × 删除。
+    // 标题 + 说明，下面每个来源一节「组名 · 个数」+ 按词宽自动换行的小标签（原为等宽 3 列大词卡），悬停标签出现 × 删除。
     private func makeSyncedHotWordsSection(groups: [SyncedHotWords.Group], total: Int) -> NSView? {
         syncedHotWordTargets = []
         guard !groups.isEmpty else { return nil }
@@ -6706,24 +6687,31 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             section.addArrangedSubview(heading)
             section.setCustomSpacing(8, after: heading)
 
-            let manual = group.name == SyncedHotWords.manualGroup
-            let chips: [NSView] = group.words.map { word in
+            var pills: [NSView] = []
+            var widths: [CGFloat] = []
+            for word in group.words {
                 syncedHotWordTargets.append(word)
-                return makeSyncedHotWordChip(word, manual: manual, tag: syncedHotWordTargets.count - 1)
+                let pill = makeSyncedHotWordPill(word, tag: syncedHotWordTargets.count - 1)
+                pills.append(pill.view)
+                widths.append(pill.width)
             }
-            let grid = AdaptiveGridView(items: chips, rowHeight: 34, spacing: 8, twoColumnsBelow: 480)
-            section.addArrangedSubview(grid)
-            grid.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
-            if gi < groups.count - 1 { section.setCustomSpacing(18, after: grid) }
+            let flow = FlowView(items: pills, widths: widths, itemHeight: Self.hotWordPillHeight, spacing: 6, lineSpacing: 6)
+            section.addArrangedSubview(flow)
+            flow.widthAnchor.constraint(equalTo: section.widthAnchor).isActive = true
+            if gi < groups.count - 1 { section.setCustomSpacing(18, after: flow) }
         }
         return section
     }
 
-    /// 同步热词的小词卡：与词条卡同一套样式（圆角描边、来源图标、悬停变底色），高度更紧凑，悬停浮现 ×
-    private func makeSyncedHotWordChip(_ word: String, manual: Bool, tag: Int) -> NSView {
+    private static let hotWordPillHeight: CGFloat = 26
+
+    /// 本地改动：同步热词小标签：按词宽、26pt 高、圆角细描边、不带图标；悬停变底色并在右侧浮现 ×（位置预留，出现时文字不跳）。
+    /// 悬停高亮沿用 VocabChipView（同一时间只亮一个，滚动时按鼠标实际位置重判）。
+    private func makeSyncedHotWordPill(_ word: String, tag: Int) -> (view: NSView, width: CGFloat) {
+        let h = Self.hotWordPillHeight
         let chip = VocabChipView()
         chip.wantsLayer = true
-        chip.layer?.cornerRadius = 8
+        chip.layer?.cornerRadius = h / 2
         chip.layer?.borderWidth = 1
         chip.layer?.setAppearanceBorder(theme.sep)
         chip.layer?.setAppearanceBackground(theme.card)
@@ -6731,47 +6719,37 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         chip.hoverBg = theme.cardAlt
         chip.toolTip = word
 
-        let icon = NSImageView()
-        icon.image = NSImage(systemSymbolName: manual ? "pencil" : "arrow.triangle.2.circlepath",
-                             accessibilityDescription: manual ? "手动添加" : "自动同步")
-        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 10, weight: .medium)
-        icon.contentTintColor = theme.text3
-        icon.setContentHuggingPriority(.required, for: .horizontal)
-
-        let text = label(word, size: 12.5, weight: .medium, color: theme.text)
+        let text = NSTextField(labelWithString: word)
+        text.font = .systemFont(ofSize: 12.5, weight: .regular)
+        text.textColor = theme.text
         text.lineBreakMode = .byTruncatingTail
         text.maximumNumberOfLines = 1
+        text.translatesAutoresizingMaskIntoConstraints = false
         text.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         let remove = makeChipIconButton(symbol: "xmark", tooltip: "删除，之后不会再自动加回",
                                         action: #selector(blockSyncedHotWordTapped(_:)), tag: tag)
-        remove.image = remove.image?.withSymbolConfiguration(.init(pointSize: 10, weight: .semibold))
-        remove.setContentHuggingPriority(.required, for: .horizontal)
+        remove.image = remove.image?.withSymbolConfiguration(.init(pointSize: 9, weight: .semibold))
+        remove.translatesAutoresizingMaskIntoConstraints = false
         remove.isHidden = true
+        remove.setAccessibilityLabel("删除 \(word)")
         chip.onHoverChange = { [weak remove] hovering in remove?.isHidden = !hovering }
 
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-
-        let inner = NSStackView()
-        inner.orientation = .horizontal
-        inner.alignment = .centerY
-        inner.spacing = 7
-        inner.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 0, right: 10)
-        inner.addArrangedSubview(icon)
-        inner.addArrangedSubview(text)
-        inner.addArrangedSubview(spacer)
-        inner.addArrangedSubview(remove)
-        inner.translatesAutoresizingMaskIntoConstraints = false
-        chip.addSubview(inner)
+        chip.addSubview(text)
+        chip.addSubview(remove)
+        let leftPad: CGFloat = 11, gap: CGFloat = 3, removeW: CGFloat = 12, rightPad: CGFloat = 7
         NSLayoutConstraint.activate([
-            inner.leadingAnchor.constraint(equalTo: chip.leadingAnchor),
-            inner.trailingAnchor.constraint(equalTo: chip.trailingAnchor),
-            inner.topAnchor.constraint(equalTo: chip.topAnchor),
-            inner.bottomAnchor.constraint(equalTo: chip.bottomAnchor),
+            text.leadingAnchor.constraint(equalTo: chip.leadingAnchor, constant: leftPad),
+            text.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
+            remove.leadingAnchor.constraint(equalTo: text.trailingAnchor, constant: gap),
+            remove.trailingAnchor.constraint(equalTo: chip.trailingAnchor, constant: -rightPad),
+            remove.centerYAnchor.constraint(equalTo: chip.centerYAnchor),
+            remove.widthAnchor.constraint(equalToConstant: removeW),
+            remove.heightAnchor.constraint(equalToConstant: removeW),
         ])
-        return chip
+        // 超长的词截到 240pt，末尾省略号；完整词看 tooltip
+        let textW = min(240, ceil(text.intrinsicContentSize.width))
+        return (chip, leftPad + textW + gap + removeW + rightPad)
     }
 
     /// 本地改动：删一个同步热词：从 hot_words 和分组里拿掉、记进 hot_words_blocked（同步脚本不会再加回来），
@@ -7266,7 +7244,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         } else {
             hasPendingUpdate = false
         }
-        let updateButton = VPButton(title: hasPendingUpdate ? "查看新版本" : "检查更新…", style: .secondary, size: .regular,
+        let updateButton = VPButton(title: hasPendingUpdate ? "查看新版本" : "查看作者新版本",   // 本地改动：只是打开上游 Releases 页
+                                    style: .secondary, size: .regular,
                                     theme: theme, target: self, action: #selector(checkForUpdatesTapped(_:)))
         updateButton.translatesAutoresizingMaskIntoConstraints = false
         updateButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 112).isActive = true
@@ -7441,6 +7420,11 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     private func monoFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
         return NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+    }
+
+    /// 本地改动：统计数字用系统字体 + 等宽数字（数字对齐，逗号不像全等宽字体那么宽）
+    private func digitFont(size: CGFloat, weight: NSFont.Weight) -> NSFont {
+        return NSFont.monospacedDigitSystemFont(ofSize: size, weight: weight)
     }
 
     private func circle(color: NSColor, size: CGFloat) -> NSView {

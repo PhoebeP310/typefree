@@ -43,13 +43,25 @@ final class HomeStatsTests: XCTestCase {
     }
 
     func testWeekOverWeekText() {
-        XCTAssertEqual(InputStats.weekOverWeekText(current: 123, previous: 100), "本周 ↑23%")
-        XCTAssertEqual(InputStats.weekOverWeekText(current: 88, previous: 100), "本周 ↓12%")
-        XCTAssertEqual(InputStats.weekOverWeekText(current: 100, previous: 100), "本周持平")
-        XCTAssertEqual(InputStats.weekOverWeekText(current: 1001, previous: 1000), "本周持平", "不到 0.5% 四舍五入算持平")
-        XCTAssertEqual(InputStats.weekOverWeekText(current: 0, previous: 100), "本周 ↓100%")
-        XCTAssertEqual(InputStats.weekOverWeekText(current: 500, previous: 0), "上周同期没有使用")
-        XCTAssertEqual(InputStats.weekOverWeekText(current: 0, previous: 0), "上周同期没有使用")
+        XCTAssertEqual(InputStats.weekOverWeekText(current: 123, previous: 100), "比上周同期 ↑23%")
+        XCTAssertEqual(InputStats.weekOverWeekText(current: 88, previous: 100), "比上周同期 ↓12%")
+        XCTAssertEqual(InputStats.weekOverWeekText(current: 100, previous: 100), "与上周同期持平")
+        XCTAssertEqual(InputStats.weekOverWeekText(current: 1001, previous: 1000), "与上周同期持平", "不到 0.5% 四舍五入算持平")
+        XCTAssertEqual(InputStats.weekOverWeekText(current: 0, previous: 100), "比上周同期 ↓100%")
+        XCTAssertNil(InputStats.weekOverWeekText(current: 500, previous: 0), "上周同期为 0：没有基数，界面改显示次数")
+        XCTAssertNil(InputStats.weekOverWeekText(current: 0, previous: 0))
+    }
+
+    // 本地改动：按应用卡片的显示名
+    func testAppDisplayName() {
+        XCTAssertEqual(AppUsageSplit.displayName("Wea"), "WEA")
+        XCTAssertEqual(AppUsageSplit.displayName("wea"), "WEA")
+        XCTAssertEqual(AppUsageSplit.displayName("wechat"), "WeChat")
+        XCTAssertEqual(AppUsageSplit.displayName("cursor"), "Cursor", "全小写且不在映射表：首字母大写")
+        XCTAssertEqual(AppUsageSplit.displayName("Google Chrome"), "Google Chrome", "正常写法原样")
+        XCTAssertEqual(AppUsageSplit.displayName("微信"), "微信")
+        XCTAssertEqual(AppUsageSplit.displayName("iTerm2"), "iTerm2")
+        XCTAssertEqual(AppUsageSplit.displayName(AppUsageSplit.otherName), AppUsageSplit.otherName)
     }
 
     // MARK: - 按应用
