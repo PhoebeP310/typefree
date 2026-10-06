@@ -46,3 +46,34 @@ final class PolishUserRulesTests: XCTestCase {
         XCTAssertEqual(s, "\n\n## 用户的写作规则（优先遵守）\n- A\n- C")
     }
 }
+
+/// 本地改动：polish_user_rules.english 只在输出语言是英文时附加
+final class PolishUserRulesEnglishTests: XCTestCase {
+    private let rules: [String: Any] = [
+        "global": ["不要使用破折号"],
+        "english": ["英文输出用短句", "with 不要缩写成 w/"],
+    ]
+    private let en = OutputLanguage.builtin.first { $0.id == "en" }!
+    private let ja = OutputLanguage.builtin.first { $0.id == "ja" }!
+
+    func testEnglishRulesOnlyForEnglishOutput() {
+        let none = AIPolisher.userRulesPromptSection(rawRules: rules, appName: nil)
+        XCTAssertEqual(none, "\n\n## 用户的写作规则（优先遵守）\n- 不要使用破折号")
+        let japanese = AIPolisher.userRulesPromptSection(rawRules: rules, appName: nil, outputLanguage: ja)
+        XCTAssertFalse(japanese.contains("英文输出用短句"))
+        let english = AIPolisher.userRulesPromptSection(rawRules: rules, appName: nil, outputLanguage: en)
+        XCTAssertEqual(english, "\n\n## 用户的写作规则（优先遵守）\n- 不要使用破折号\n- 英文输出用短句\n- with 不要缩写成 w/")
+    }
+
+    func testEnglishRulesAloneAndInComposedPrompt() {
+        let only: [String: Any] = ["english": ["Thx"]]
+        XCTAssertEqual(AIPolisher.userRulesPromptSection(rawRules: only, appName: "WEA"), "")
+        XCTAssertEqual(AIPolisher.userRulesPromptSection(rawRules: only, appName: "WEA", outputLanguage: en),
+                       "\n\n## 用户的写作规则（优先遵守）\n- Thx")
+        let sysEN = AIPolisher.composedPromptForTesting(outputLanguage: en, outputFormat: nil, rawRules: rules, appName: nil)
+        XCTAssertTrue(sysEN.contains("## 目标语言"))
+        XCTAssertTrue(sysEN.contains("- 英文输出用短句"))
+        let sysZH = AIPolisher.composedPromptForTesting(outputLanguage: nil, outputFormat: .keyPoints, rawRules: rules, appName: nil)
+        XCTAssertFalse(sysZH.contains("英文输出用短句"))
+    }
+}

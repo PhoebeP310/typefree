@@ -295,9 +295,11 @@ public class AIPolisher {
     /// 画像观察期（owner 2026-07-03 定）：画像照常统计、照常写 style_profile.json，
     /// 但注入默认关闭——先观察它总结得准不准，确认后把下面的开关置 true 再生效，
     /// 避免总结错了反而把润色带偏。
-    private func composedPolishSystemPrompt(outputLanguage: OutputLanguage? = nil) -> String {
+    private func composedPolishSystemPrompt(outputLanguage: OutputLanguage? = nil, outputFormat: OutputFormat? = nil) -> String {
         var prompt = cloudASRPolishPrompt
         if let outputLanguage { prompt += Self.outputLanguageSystemSection(for: outputLanguage) }
+        // 本地改动：格式口令（改成要点 / 结论先行）
+        if let outputFormat { prompt += Self.outputFormatSystemSection(for: outputFormat) }
         // 基线对齐（owner 2026-07-03 实测定）：润色提示词严格回到线上 2.5.1 的组成。
         // 实测发现叠加"保留/不要改"类条款会让模型整体变怂（废话不删、语序不理、口误不修），
         // 所以词库段和画像段都默认不注入，之后一次只开一个、用真实用例验证再放行。
@@ -309,7 +311,17 @@ public class AIPolisher {
             prompt += "\n\n" + styleSection
         }
         // 本地改动：用户在 config.json 的 polish_user_rules 里写的规则（全局 + 按前台 App），放最后
-        prompt += Self.userRulesPromptSection(rawRules: configuredUserRules(), appName: polishLogAppNameProvider?())
+        prompt += Self.userRulesPromptSection(rawRules: configuredUserRules(), appName: polishLogAppNameProvider?(),
+                                              outputLanguage: outputLanguage)
+        return prompt
+    }
+
+    /// 本地改动：给测试和离线核对用，拼出与线上请求相同的 system prompt（不读 config 里的词库/画像开关，只拼基础 + 语言 + 格式 + 用户规则）
+    static func composedPromptForTesting(outputLanguage: OutputLanguage?, outputFormat: OutputFormat?, rawRules: Any?, appName: String?) -> String {
+        var prompt = AIPolisher.baseCloudASRPolishPrompt
+        if let outputLanguage { prompt += outputLanguageSystemSection(for: outputLanguage) }
+        if let outputFormat { prompt += outputFormatSystemSection(for: outputFormat) }
+        prompt += userRulesPromptSection(rawRules: rawRules, appName: appName, outputLanguage: outputLanguage)
         return prompt
     }
 
@@ -326,7 +338,8 @@ public class AIPolisher {
     /// 形状：{"global": [String], "apps": {"<App 名子串>": [String]}}；App 名不区分大小写做子串匹配。
     /// 没有适用规则时返回空串，prompt 保持原样。
     /// 注意：规则要短、只管格式，「保留/不要改」类条款写多了会让模型整体变怂。
-    static func userRulesPromptSection(rawRules: Any?, appName: String?) -> String {
+    /// 本地改动：可选 "english": [String]，只在本次输出语言是英文（id == "en"）时附加（「用英文」口令或固定输出英文）。
+    static func userRulesPromptSection(rawRules: Any?, appName: String?, outputLanguage: OutputLanguage? = nil) -> String {
         guard let dict = rawRules as? [String: Any] else { return "" }
         func clean(_ value: Any?) -> [String] {
             ((value as? [Any]) ?? []).compactMap { ($0 as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) }
@@ -342,6 +355,9 @@ public class AIPolisher {
                 rules.append(contentsOf: clean(apps[key]))
             }
         }
+        if outputLanguage?.id == "en" {
+            rules.append(contentsOf: clean(dict["english"]))
+        }
         var seen = Set<String>()
         rules = rules.filter { seen.insert($0).inserted }
         guard !rules.isEmpty else { return "" }
@@ -350,7 +366,9 @@ public class AIPolisher {
 
     // MARK: - 云端 ASR 后润色
 
-    private let cloudASRPolishPrompt = """
+    private var cloudASRPolishPrompt: String { Self.baseCloudASRPolishPrompt }
+
+    static let baseCloudASRPolishPrompt = """
     你是一个语音转文字的整理助手。用户通过语音输入了一段话，你要把它整理成好读的文本。
 
     ## 你的角色
@@ -401,13 +419,44 @@ public class AIPolisher {
         """
     }
 
-    static func makeCloudASRPolishUserPrompt(for text: String, outputLanguage: OutputLanguage? = nil) -> String {
-        if let outputLanguage {
+    /// 本地改动：格式口令的标记与 system prompt 段（同「目标语言」的做法：用户消息末尾带标记，system 里解释标记）
+    static func outputFormatRequestMarker(for format: OutputFormat) -> String {
+        switch format {
+        case .keyPoints: return "【本次要求：改成要点】"
+        case .conclusionFirst: return "【本次要求：结论先行】"
+        }
+    }
+
+    static func outputFormatSystemSection(for format: OutputFormat) -> String {
+        let marker = outputFormatRequestMarker(for: format)
+        switch format {
+        case .keyPoints:
+            return """
+
+
+            ## 输出格式要求：改成要点
+            如果待整理文本后面带有\(marker)，说明用户要求把这段话整理成要点：输出一个编号列表（1. 2. 3.），每条一个要点、尽量简短；保留原文的全部信息，不要丢掉任何事实、数字、人名、时间和要求，也不要添加原文没有的内容；不要加标题、不要加粗、不要加总结句。此时「适当分段」这条不适用，只输出这个编号列表；这是用户本次的明确要求，优先于下面用户写作规则里「不分段、不编号」之类的格式规定。
+            """
+        case .conclusionFirst:
+            return """
+
+
+            ## 输出格式要求：结论先行
+            如果待整理文本后面带有\(marker)，说明用户要求结论先行：调整顺序，让结论或用户的请求成为第一句，后面再放理由和依据；尽量保留用户自己的用词，只调顺序和必要的衔接，不要添加原文没有的内容；不要加标题、不要加「结论：」「理由：」这类标签、不要加粗。
+            """
+        }
+    }
+
+    static func makeCloudASRPolishUserPrompt(for text: String, outputLanguage: OutputLanguage? = nil, outputFormat: OutputFormat? = nil) -> String {
+        // 本地改动：有格式口令时，标记跟在语言标记后面（两者可叠加）
+        if outputLanguage != nil || outputFormat != nil {
+            let markers = [outputFormat.map { outputFormatRequestMarker(for: $0) },
+                           outputLanguage.map { outputRequestMarker(for: $0) }].compactMap { $0 }
             return """
             待整理文本：
             \(text)
 
-            \(outputRequestMarker(for: outputLanguage))
+            \(markers.joined(separator: "\n"))
             """
         }
         if shouldUseLanguagePreservingPrompt(for: text) {
@@ -496,11 +545,11 @@ public class AIPolisher {
     }
 
     /// outputLanguage：用户用语音口令要求的目标语言（nil = 照常保留原语言）
-    public func polishCloudASROutput(text: String, outputLanguage: OutputLanguage? = nil, completion: @escaping (Result<String, Error>) -> Void) {
+    public func polishCloudASROutput(text: String, outputLanguage: OutputLanguage? = nil, outputFormat: OutputFormat? = nil, completion: @escaping (Result<String, Error>) -> Void) {
         // 会员选了「优先走会员服务」：填了自己的 Key 也走会员通道（用户没选「不优化」时）
         if HostedRoute.current(ownKeyConfigured: polishProvider() != nil) == .member,
            !Self.isPolishDisabled(provider: VoicePolishConfig.shared.string(forKey: "polish_provider")) {
-            polishHosted(route: .member, text: text, outputLanguage: outputLanguage, completion: completion)
+            polishHosted(route: .member, text: text, outputLanguage: outputLanguage, outputFormat: outputFormat, completion: completion)
             return
         }
         guard let provider = polishProvider() else {
@@ -509,7 +558,7 @@ public class AIPolisher {
             let providerSetting = VoicePolishConfig.shared.string(forKey: "polish_provider")
             let hostedRoute = HostedRoute.current(ownKeyConfigured: false)
             if !Self.isPolishDisabled(provider: providerSetting) && hostedRoute != .none {
-                polishHosted(route: hostedRoute, text: text, outputLanguage: outputLanguage, completion: completion)
+                polishHosted(route: hostedRoute, text: text, outputLanguage: outputLanguage, outputFormat: outputFormat, completion: completion)
                 return
             }
             completion(.failure(PolishError.noAPIKey))
@@ -518,8 +567,8 @@ public class AIPolisher {
 
         debugLog?("Cloud ASR polish provider=\(provider.name) model=\(provider.model)")
 
-        let systemPrompt = composedPolishSystemPrompt(outputLanguage: outputLanguage)
-        let userPrompt = Self.makeCloudASRPolishUserPrompt(for: text, outputLanguage: outputLanguage)
+        let systemPrompt = composedPolishSystemPrompt(outputLanguage: outputLanguage, outputFormat: outputFormat)
+        let userPrompt = Self.makeCloudASRPolishUserPrompt(for: text, outputLanguage: outputLanguage, outputFormat: outputFormat)
 
         func makeBody(_ model: String) -> [String: Any] {
             var body: [String: Any] = [
@@ -603,15 +652,15 @@ public class AIPolisher {
     /// 走服务器试用代理润色（POST /trial/polish）。固定用 qwen3.8-max——质量优先链的头部：
     /// 试用是转化窗口给最好的效果（2026-08-06 实测 3.7-plus 会编造整句、3.8-max 最稳还更快，
     /// 成本有服务器三层限额兜底）。故意不跟随用户的「润色设置」——那是 BYOK 用户用的。
-    private func polishHosted(route: HostedRoute, text: String, outputLanguage: OutputLanguage? = nil,
+    private func polishHosted(route: HostedRoute, text: String, outputLanguage: OutputLanguage? = nil, outputFormat: OutputFormat? = nil,
                               completion: @escaping (Result<String, Error>) -> Void) {
         // 试用：qwen3.8-max（转化窗口给最好效果，2026-08-06 实测）；会员：qwen3.7-plus（与 owner 自用一致，会员成本按它测算）
         let model = route == .member ? "qwen3.7-plus" : "qwen3.8-max"
         let body: [String: Any] = [
             "model": model,
             "messages": [
-                ["role": "system", "content": composedPolishSystemPrompt(outputLanguage: outputLanguage)],
-                ["role": "user", "content": Self.makeCloudASRPolishUserPrompt(for: text, outputLanguage: outputLanguage)]
+                ["role": "system", "content": composedPolishSystemPrompt(outputLanguage: outputLanguage, outputFormat: outputFormat)],
+                ["role": "user", "content": Self.makeCloudASRPolishUserPrompt(for: text, outputLanguage: outputLanguage, outputFormat: outputFormat)]
             ],
             "top_p": 0.8,
             "temperature": 0.7,

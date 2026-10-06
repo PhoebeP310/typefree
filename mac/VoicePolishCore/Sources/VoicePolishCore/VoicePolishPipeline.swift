@@ -238,14 +238,64 @@ public final class VoicePolishPipeline {
     /// 这里对模型文本再跑一次同样的口令规则：命中就剥掉口令，再走同一条「按目标语言输出」的润色路径翻译。
     /// 只认口令，不套「默认输出语言」（omni 从来没接过这项设置，行为保持不变）。
     private func handleOmniText(_ text: String, pipelineStart: Date, samples: [Float], entryID: String) {
-        let command = Self.detectOutputLanguageCommand(in: text)
+        // 本地改动：语言口令和格式口令（改成要点 / 结论先行）一起识别、一起剥掉
+        let commands = Self.detectVoiceCommands(in: text)
+        let command = commands.language
+        let format = commands.format?.format
         guard let plan = Self.resolveOutputLanguage(rawText: text, command: command, defaultLanguage: nil) else {
+            if let formatCommand = commands.format {
+                log("Omni text carries output format command, stripping and reformatting")
+                applyOutputFormatOnly(formatCommand, text: commands.strippedText, rawASR: text,
+                                      pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+                return
+            }
             finishProcessing(with: text, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
             return
         }
         log("Omni text carries output language command, stripping and translating")
-        applyOutputLanguage(plan.target, command: command, text: plan.text, rawASR: text,
+        applyOutputLanguage(plan.target, command: command, format: format, text: commands.strippedText, rawASR: text,
                             pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+    }
+
+    /// 本地改动：语言 + 格式口令一起识别（总开关同「语音口令」output_language_command_enabled）
+    static func detectVoiceCommands(in text: String) -> VoiceCommands {
+        let config = VoicePolishConfig.shared
+        guard config.bool(forKey: OutputLanguage.commandEnabledConfigKey, defaultValue: true) else {
+            return VoiceCommands(language: nil, format: nil, strippedText: text)
+        }
+        return VoiceCommands.parse(text, languages: OutputLanguage.configured(config: config))
+    }
+
+    /// 本地改动：只有格式口令、没有目标语言。润色开着 → 带格式要求润色；关着（不优化）→ 只剥口令照常输出。
+    private func applyOutputFormatOnly(_ command: OutputFormatCommand, text: String, rawASR: String,
+                                       pipelineStart: Date, samples: [Float], entryID: String) {
+        let format = command.format
+        log("Output format command: \(command.matchedPhrase) (\(command.position.rawValue)) → \(format.rawValue)")
+        guard aiPolisher.isPolishEnabled() else {
+            log("Polish disabled, output format ignored")
+            finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            return
+        }
+        emit(.polishing(message: "→ \(format.name)"), entryID)
+        let polishStart = Date()
+        aiPolisher.polishCloudASROutput(text: text, outputFormat: format) { [weak self] result in
+            guard let self = self else { return }
+            let polishTime = Date().timeIntervalSince(polishStart)
+            switch result {
+            case .success(let polished) where !polished.isEmpty:
+                self.log("Output format \(format.rawValue) done in \(String(format: "%.1f", polishTime))s, chars=\(polished.count)")
+                self.finishProcessing(with: polished, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            case .success:
+                self.finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            case .failure(let err):
+                self.log("Output format \(format.rawValue) failed in \(String(format: "%.1f", polishTime))s: \(err), fallback to original")
+                if case AIPolisher.PolishError.noAPIKey = err {} else if self.isActive(entryID) {
+                    let reason = (err as? LocalizedError)?.errorDescription ?? "\(err)"
+                    self.onPolishFailed?(reason)
+                }
+                self.finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            }
+        }
     }
 
     /// 决定本次是否要按目标语言输出：语音口令优先，其次是「默认输出语言」；返回目标语言与去掉口令后的正文。
@@ -255,7 +305,7 @@ public final class VoicePolishPipeline {
     }
 
     /// 按目标语言输出（cloudOnly 与 omni 共用）：润色开着就交给模型「把这段用 X 写出来」；关着就只剥口令照常输出。
-    private func applyOutputLanguage(_ target: OutputLanguage, command: OutputLanguageCommand?, text: String, rawASR: String,
+    private func applyOutputLanguage(_ target: OutputLanguage, command: OutputLanguageCommand?, format: OutputFormat? = nil, text: String, rawASR: String,
                                      pipelineStart: Date, samples: [Float], entryID: String) {
         if let command {
             log("Output language command: \(command.matchedPhrase) (\(command.position.rawValue)) → \(target.id)")
@@ -270,7 +320,7 @@ public final class VoicePolishPipeline {
         }
         emit(.polishing(message: "→ \(target.tag)"), entryID)
         let polishStart = Date()
-        aiPolisher.polishCloudASROutput(text: text, outputLanguage: target) { [weak self] result in
+        aiPolisher.polishCloudASROutput(text: text, outputLanguage: target, outputFormat: format) { [weak self] result in
             guard let self = self else { return }
             let polishTime = Date().timeIntervalSince(polishStart)
             switch result {
@@ -296,10 +346,17 @@ public final class VoicePolishPipeline {
     private func handleCloudOnlyText(_ rawText: String, mode: ProcessingMode, pipelineStart: Date, samples: [Float], entryID: String) {
         // 目标语言：语音口令（句首/句尾「用英文」「翻译成日文」等）优先，其次是设置里的「默认输出语言」。
         // 口令由程序规则识别，不交给模型领会；模型只负责「把这段用 X 写出来」。
-        let command = Self.detectOutputLanguageCommand(in: rawText)
+        // 本地改动：语言口令和格式口令（改成要点 / 结论先行）一起识别；正文用两者都剥掉后的文本
+        let commands = Self.detectVoiceCommands(in: rawText)
+        let command = commands.language
         if let plan = Self.resolveOutputLanguage(rawText: rawText, command: command, defaultLanguage: OutputLanguage.defaultLanguage()) {
-            applyOutputLanguage(plan.target, command: command, text: plan.text, rawASR: rawText,
+            applyOutputLanguage(plan.target, command: command, format: commands.format?.format, text: commands.strippedText, rawASR: rawText,
                                 pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            return
+        }
+        if let formatCommand = commands.format {
+            applyOutputFormatOnly(formatCommand, text: commands.strippedText, rawASR: rawText,
+                                  pipelineStart: pipelineStart, samples: samples, entryID: entryID)
             return
         }
 

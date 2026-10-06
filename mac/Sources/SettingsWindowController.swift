@@ -5332,7 +5332,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         column.orientation = .vertical
         column.alignment = .leading
         column.spacing = 12
-        let help = makeExploreHelp("在句首或句尾加上口令，这一次就用指定语言输出。句首说完口令后稍停一下。开启固定语言时，胶囊会显示对应语言标签。翻译需要开启 AI 润色。")
+        // 本地改动：补一句格式口令「改成要点」「结论先行」
+        let help = makeExploreHelp("在句首或句尾加上口令，这一次就用指定语言输出。句首说完口令后稍停一下。开启固定语言时，胶囊会显示对应语言标签。翻译需要开启 AI 润色。也可以说「改成要点」「结论先行」调整本次格式，能和语言口令一起用。")
         column.addArrangedSubview(help)
         help.widthAnchor.constraint(equalTo: column.widthAnchor).isActive = true
 
