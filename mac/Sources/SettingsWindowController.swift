@@ -2528,12 +2528,23 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         leftStack.addArrangedSubview(desc)
 
         // 三个鼠标 / 口令用法一眼看到（3.0 新功能），点哪个看哪个的演示
-        let gestures = NSStackView()
-        gestures.orientation = .horizontal
-        gestures.alignment = .centerY
-        gestures.spacing = 28
-        gestures.addArrangedSubview(makeGestureHint(key: "输入框里按住鼠标", label: "说话", feature: .mouseHold))
-        gestures.addArrangedSubview(makeGestureHint(key: "结尾说「用英文」", label: "翻译", feature: .translation))
+        // 本地改动：口令都放在这一块，两行：第一行原有的说话 / 翻译，第二行格式口令（改成要点 / 结论先行）
+        func hintRow(_ views: [NSView]) -> NSStackView {
+            let r = NSStackView(views: views)
+            r.orientation = .horizontal
+            r.alignment = .centerY
+            r.spacing = 28
+            return r
+        }
+        let gestures = NSStackView(views: [
+            hintRow([makeGestureHint(key: "输入框里按住鼠标", label: "说话", feature: .mouseHold),
+                     makeGestureHint(key: "结尾说「用英文」", label: "翻译", feature: .translation)]),
+            hintRow([makeGestureHint(key: "结尾说「改成要点」", label: "编号要点", feature: nil),
+                     makeGestureHint(key: "结尾说「结论先行」", label: "结论放第一句", feature: nil)]),
+        ])
+        gestures.orientation = .vertical
+        gestures.alignment = .leading
+        gestures.spacing = 10
 
         let main = NSStackView()
         main.orientation = .vertical
@@ -2551,7 +2562,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     }
 
     /// 首页快捷用法：键帽样式的动作 + 结果；整块可点，打开该功能的演示
-    private func makeGestureHint(key: String, label text: String, feature: WhatsNewGuide.Feature) -> NSView {
+    private func makeGestureHint(key: String, label text: String, feature: WhatsNewGuide.Feature?) -> NSView {
         let cap = NSView()
         cap.translatesAutoresizingMaskIntoConstraints = false
         cap.wantsLayer = true
@@ -2574,6 +2585,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.orientation = .horizontal
         row.alignment = .centerY
         row.spacing = 8
+        // 本地改动：没有演示的口令（改成要点 / 结论先行）只展示，不可点
+        guard let feature else { return row }
         row.toolTip = "看演示"
         let click = NSClickGestureRecognizer(target: self, action: #selector(gestureHintTapped(_:)))
         row.addGestureRecognizer(click)
