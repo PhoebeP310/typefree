@@ -14,10 +14,7 @@ protocol SettingsWindowDelegate: AnyObject {
     func checkForUpdates(_ sender: Any?)
     func pendingUpdateInfo() -> TypefreeUpdateInfo?
     func showUpdateDetails(_ sender: Any?)
-    /// 反馈页：最近一次录音时在用的软件名（定位「某个软件里不好用」）
-    func recentTargetAppName() -> String?
-    /// 反馈页：最近的调试日志片段（纯文本，随消息一起发给开发者）
-    func debugLogTail() -> String
+    // 本地改动：删掉「反馈」页，recentTargetAppName / debugLogTail（随反馈消息发给作者的线索）一并去掉
     /// 复用 App 的调试日志（同一个文件、同一套轮转），设置页的耗时诊断也写进去。
     func debugLog(_ message: String)
 }
@@ -1114,7 +1111,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
     enum Page: CaseIterable {
         case home
         case history
-        case support
+        // 本地改动：删掉「反馈」页（会把文字、转写、录音发到作者服务器 api.typefree.app）
         case vocabulary
         case model
         case explore
@@ -1125,7 +1122,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             switch self {
             case .home: return "首页"
             case .history: return "历史记录"
-            case .support: return "反馈"
             case .vocabulary: return "个人词库"
             case .model: return "模型"
             case .explore: return "探索"
@@ -1138,7 +1134,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             switch self {
             case .home: return "house"
             case .history: return "clock.arrow.circlepath"
-            case .support: return "bubble.left.and.bubble.right"
             case .vocabulary: return "book.closed"
             case .model: return "cpu"
             case .explore: return "sparkles"
@@ -1600,11 +1595,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         // 原来只数 term_corrections，自动同步的热词不算在内
         let vocabCount = PersonalVocabulary.currentPersonalWordCount()
 
-        let unread = SupportChatService.shared.unreadCount
+        // 本地改动：侧栏去掉「反馈」及其未读角标
         let groups: [(String?, [(Page, String?)])] = [
             ("工作台", [(.home, nil), (.history, historyCount > 0 ? "\(historyCount)" : nil)]),
-            ("配置", [(.vocabulary, vocabCount > 0 ? "\(vocabCount)" : nil), (.model, nil), (.explore, nil), (.settings, nil),
-                     (.support, unread > 0 ? "\(unread) 条新回复" : nil)]),
+            ("配置", [(.vocabulary, vocabCount > 0 ? "\(vocabCount)" : nil), (.model, nil), (.explore, nil), (.settings, nil)]),
             (nil, [(.about, nil)]),
         ]
 
@@ -2087,61 +2081,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         for (k, scroll) in cachedScrolls {
             scroll.isHidden = (k != page)
         }
-
-        if page == .support { supportChatView?.pageDidAppear() }
-    }
-
-    // MARK: - Page: Support（反馈工单）
-
-    private weak var supportChatView: SupportChatView?
-    private var supportObserver: NSObjectProtocol?
-
-    /// 反馈页不走通用的「内容多长页面多长」滚动：列表/对话区自己滚、输入区钉在底部，整页正好填满窗口。
-    /// 页头由 SupportChatView 自己画（列表页带「提交工单」按钮，详情页是工单标题）。
-    private func buildSupportScroll() -> NSScrollView {
-        let scroll = NSScrollView()
-        scroll.translatesAutoresizingMaskIntoConstraints = false
-        scroll.hasVerticalScroller = false
-        scroll.drawsBackground = false
-        scroll.automaticallyAdjustsContentInsets = false
-        let doc = FlippedView()
-        doc.translatesAutoresizingMaskIntoConstraints = false
-        let chat = SupportChatView(theme: theme, context: SupportChatView.Context(
-            latestTranscript: { [weak self] in
-                guard let self, let e = self.historyStore.load(limit: 1).first else { return nil }
-                let audio = e.audioFile.flatMap { self.audioStore.loadData(fileName: $0) }
-                return (asr: e.asr, output: e.output, audio: audio)
-            },
-            recentApp: { [weak self] in self?.settingsDelegate?.recentTargetAppName() },
-            logTail: { [weak self] in self?.settingsDelegate?.debugLogTail() ?? "" }
-        ))
-        supportChatView = chat
-        SupportChatView.log = { [weak self] in self?.settingsDelegate?.debugLog($0) }
-        doc.addSubview(chat)
-        scroll.documentView = doc
-        NSLayoutConstraint.activate([
-            doc.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
-            doc.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
-            doc.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
-            doc.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
-            doc.heightAnchor.constraint(equalTo: scroll.contentView.heightAnchor),
-            chat.leadingAnchor.constraint(equalTo: doc.leadingAnchor, constant: 56),
-            // 右边多给一条滚动条空隙：内容仍与其它页面一样离右边 56，浮着的滚动条落在空隙里
-            chat.trailingAnchor.constraint(equalTo: doc.trailingAnchor, constant: -56 + SupportChatView.scrollerGutter),
-            chat.topAnchor.constraint(equalTo: doc.topAnchor, constant: 36),
-            chat.bottomAnchor.constraint(equalTo: doc.bottomAnchor, constant: -32),
-            chat.widthAnchor.constraint(lessThanOrEqualToConstant: 880 + SupportChatView.scrollerGutter),
-        ])
-        if supportObserver == nil {
-            supportObserver = NotificationCenter.default.addObserver(forName: SupportChatService.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-                self?.rebuildSidebar()   // 角标跟着未读数变
-            }
-        }
-        return scroll
     }
 
     private func buildScroll(for page: Page) -> NSScrollView {
-        if page == .support { return buildSupportScroll() }
         let scroll = NSScrollView()
         scroll.translatesAutoresizingMaskIntoConstraints = false
         scroll.hasVerticalScroller = false // 隐藏主页面滚动条，仍可用滚轮和触控板滚动。
@@ -2169,7 +2111,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         case .explore: buildExplore(into: stack)
         case .settings: buildSettings(into: stack)
         case .about: buildAbout(into: stack)
-        case .support: break   // 见 buildSupportScroll
         }
 
         for v in stack.arrangedSubviews {
@@ -2302,7 +2243,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.setCustomSpacing(8, after: healthTitle)
         let healthCard = makeHealthCard()
         stack.addArrangedSubview(healthCard)
-        // 反馈搬到侧栏「反馈」页（对话式，能附截图、能收到回复）
     }
 
     // 本地改动：首页「今日按应用 / 本周按应用」卡片：一条横向堆叠条 + 每个应用一行图例（名称、字数、占比）。
