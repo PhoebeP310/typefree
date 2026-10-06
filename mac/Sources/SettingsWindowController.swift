@@ -5810,12 +5810,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         let retentionCard = makeHistoryRetentionCard()
         stack.addArrangedSubview(retentionCard)
-        stack.setCustomSpacing(20, after: retentionCard)
+        stack.setCustomSpacing(24, after: retentionCard)
 
         if allHistoryEntries.isEmpty {
             stack.addArrangedSubview(makeEmptyState("还没有历史记录。完成一次语音输入后，这里会显示最近的转写结果。"))
             return
         }
+
+        // 本地改动：记录列表前加分组小标题，和上面的「保存时长」设置条明确分开
+        let listTitle = sectionTitle("记录 · \(allHistoryEntries.count) 条")
+        stack.addArrangedSubview(listTitle)
+        stack.setCustomSpacing(8, after: listTitle)
 
         historyContentStack = stack
         appendNextHistoryBatch()
@@ -6512,10 +6517,21 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
     /// 保存时长：一套逻辑同时管文字和音频——音频始终跟着文字存、按同一时长一起过期删除。
     private func makeHistoryRetentionCard() -> NSView {
-        let card = makeCard()
+        // 本地改动：这是设置不是记录：改成浅灰底、无边框的设置条（左侧时钟图标），和下面白底描边的记录卡区分开
+        let card = NSView()
+        card.translatesAutoresizingMaskIntoConstraints = false
+        card.wantsLayer = true
+        card.layer?.cornerRadius = 10
+        card.layer?.setAppearanceBackground(theme.cardAlt)
 
-        let title = label("语音输入内容保存时长", size: 14, weight: .medium, color: theme.text)
-        let sub = label("文字和音频一起保存。默认保存全部数据；改成较短时长后，过期的本地历史会自动删除。",
+        let icon = NSImageView()
+        icon.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: "保存时长")
+        icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+        icon.contentTintColor = theme.text3
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+
+        let title = label("保存时长", size: 13, weight: .medium, color: theme.text)
+        let sub = label("文字和音频一起保存在本机；改成较短时长后，过期的历史会自动删除。",
                         size: 12, weight: .regular, color: theme.text3)
         sub.maximumNumberOfLines = 0
 
@@ -6536,8 +6552,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.orientation = .horizontal
         row.alignment = .centerY
         row.distribution = .fill
-        row.spacing = 18
-        row.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
+        row.spacing = 12
+        row.edgeInsets = NSEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+        row.addArrangedSubview(icon)
         row.addArrangedSubview(textStack)
         row.addArrangedSubview(retentionBtn)
 
