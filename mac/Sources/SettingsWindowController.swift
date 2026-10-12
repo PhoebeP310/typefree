@@ -5543,6 +5543,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.setCustomSpacing(20, after: retentionCard)
 
         if allHistoryEntries.isEmpty {
+            // 文件里有记录、却一条都解不开：多半是钥匙串读不出解密钥匙（工单 #1034）。
+            // 原先也显示「还没有历史记录」，用户以为记录全丢了，可能顺手点「清空历史」把能找回的记录删掉。
+            let stored = quickHistoryLineCount()
+            if stored > 0 {
+                let keyReadable = HistoryCrypto.defaultEncryptor() != nil
+                delegate.debugLog("[history] \(stored) stored entries, none readable (key readable=\(keyReadable))")
+                stack.addArrangedSubview(makeEmptyState(keyReadable
+                    ? "有 \(stored) 条历史记录暂时读不出来（解密钥匙可能已更换）。记录还在本机，请不要清空历史，可以在「反馈」里联系我们。"
+                    : "有 \(stored) 条历史记录暂时读不出来：没能从系统「钥匙串」取到解密钥匙。记录都还在，请不要清空历史。\n重启电脑后打开 Typefree，系统询问时输入开机密码并点「始终允许」。"))
+                return
+            }
             stack.addArrangedSubview(makeEmptyState("还没有历史记录。完成一次语音输入后，这里会显示最近的转写结果。"))
             return
         }

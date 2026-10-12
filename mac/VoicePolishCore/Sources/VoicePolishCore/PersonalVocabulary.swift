@@ -51,7 +51,31 @@ public enum PersonalVocabulary {
     /// 生成给 ASR 的提示句（与实测验证生效的措辞保持一致），词表为空时返回 nil。
     static func contextSentence(for words: [String]) -> String? {
         guard !words.isEmpty else { return nil }
-        return "用户常说的词：" + words.joined(separator: "、")
+        return contextSentencePrefix + "：" + words.joined(separator: "、")
+    }
+
+    /// 提示句前缀（`contextSentence` 的开头）。识别模型偶尔会把它原样吐出来，见 `removingContextEcho`。
+    static let contextSentencePrefix = "用户常说的词"
+
+    /// 识别模型偶尔把我们给的词库提示句当成识别结果吐出来——多见于没说话、只有背景声时
+    /// （工单 #1033：百炼没说话却返回「用户常说的词：拉升、Codex 协作、关于副。」）。
+    /// 去掉这句；剩下的若只是词库词用顿号串起来（去了前缀的提示句），也当没听到。
+    /// 返回 nil = 当作没识别出话（调用方按 noSpeech 处理）。
+    public static func removingContextEcho(_ text: String, words: [String]? = nil) -> String? {
+        var out = text
+        while let r = out.range(of: contextSentencePrefix) {
+            // 删到这句话结束（中文句号、问叹号或换行）；没有就删到文末。不认英文句点：词库里有 Node.js 这类词。
+            let tail = out[r.upperBound...]
+            let end = tail.firstIndex(where: { "。！？\n".contains($0) }).map { out.index(after: $0) } ?? out.endIndex
+            out.removeSubrange(r.lowerBound..<end)
+        }
+        let junk = CharacterSet.whitespacesAndNewlines.union(.punctuationCharacters)
+        let trimmed = out.trimmingCharacters(in: junk)
+        if trimmed.isEmpty { return nil }
+        let vocab = Set(words ?? currentWords())
+        let parts = trimmed.components(separatedBy: "、").map { $0.trimmingCharacters(in: junk) }
+        if parts.count >= 2, parts.allSatisfy({ vocab.contains($0) }) { return nil }
+        return out == text ? text : out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     /// 火山 corpus.context 里词库的传法（2026-09-23 按官方文档核对后新增）。

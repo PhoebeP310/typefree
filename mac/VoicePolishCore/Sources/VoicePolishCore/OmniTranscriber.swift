@@ -163,7 +163,8 @@ public final class OmniTranscriber {
                 let usage = json["usage"] as? [String: Any]
                 let inputTokens = usage?["prompt_tokens"] as? Int ?? 0
                 let outputTokens = usage?["completion_tokens"] as? Int ?? 0
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let raw = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let trimmed = raw.isEmpty ? "" : (PersonalVocabulary.removingContextEcho(raw) ?? "")
 
                 if trimmed.isEmpty {
                     self.debugLog?("Omni returned empty text in \(elapsedMs)ms")
