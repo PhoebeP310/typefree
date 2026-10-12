@@ -291,5 +291,14 @@
             <description><![CDATA[<h3>提示更准确</h3><ul><li><strong>自带 Key 时不再误报「试用已结束」</strong>：如果「语音识别」选的服务还没填 Key（比如切到了百炼，但只填过火山引擎的 Key），现在会直接告诉你是哪个服务没填，以及可以改选哪个已经填好的；如果系统钥匙串暂时读不出 Key，也会提示你重启后点「允许」。以前这两种情况都会被误报成「试用已结束」。</li></ul>]]></description>
             <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.11/Typefree-3.0.11.dmg" sparkle:edSignature="7u+2YKV6DCNqFVmBSh+2pE+bB12M6QGYT74HJapPNvAIBRpmxaU6VShj8hwnvRFQUgUTqK2Cvfeuqp7oTLeXBw==" length="2817457" type="application/octet-stream"/>
         </item>
+        <item>
+            <title>3.0.12</title>
+            <sparkle:version>3.0.12</sparkle:version>
+            <sparkle:shortVersionString>3.0.12</sparkle:shortVersionString>
+            <pubDate>Mon, 12 Oct 2026 16:21:44 +0000</pubDate>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>修复</h3><ul><li><strong>没说话时不再冒出奇怪的文字</strong>：使用阿里百炼识别、词库里有词时，如果按了快捷键却没说话，以前偶尔会打出一句「用户常说的词：……」。现在不会了，没说话就什么都不输入。</li><li><strong>历史记录读不出来时说清原因</strong>：如果系统钥匙串暂时读不出解密钥匙，历史页会提示「有 N 条记录暂时读不出来、记录都还在」，并告诉你怎么处理。以前会直接显示「还没有历史记录」，容易让人以为记录丢了。</li></ul>]]></description>
+            <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.12/Typefree-3.0.12.dmg" sparkle:edSignature="9hmIKGWfoLjm1LlidcuOBvl2M24LrfNY+Qlb+ZLN5yRpsrl9TAuOT20QG+ZqBS6RVri/KRX5BSuikHEo8xU5Dw==" length="2820489" type="application/octet-stream"/>
+        </item>
     </channel>
 </rss>
