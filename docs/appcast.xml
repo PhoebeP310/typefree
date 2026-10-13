@@ -300,5 +300,14 @@
             <description><![CDATA[<h3>修复</h3><ul><li><strong>没说话时不再冒出奇怪的文字</strong>：使用阿里百炼识别、词库里有词时，如果按了快捷键却没说话，以前偶尔会打出一句「用户常说的词：……」。现在不会了，没说话就什么都不输入。</li><li><strong>历史记录读不出来时说清原因</strong>：如果系统钥匙串暂时读不出解密钥匙，历史页会提示「有 N 条记录暂时读不出来、记录都还在」，并告诉你怎么处理。以前会直接显示「还没有历史记录」，容易让人以为记录丢了。</li></ul>]]></description>
             <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.12/Typefree-3.0.12.dmg" sparkle:edSignature="9hmIKGWfoLjm1LlidcuOBvl2M24LrfNY+Qlb+ZLN5yRpsrl9TAuOT20QG+ZqBS6RVri/KRX5BSuikHEo8xU5Dw==" length="2820489" type="application/octet-stream"/>
         </item>
+        <item>
+            <title>3.0.13</title>
+            <sparkle:version>3.0.13</sparkle:version>
+            <sparkle:shortVersionString>3.0.13</sparkle:shortVersionString>
+            <pubDate>Tue, 13 Oct 2026 14:07:58 +0000</pubDate>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>修复与改进</h3><ul><li><strong>按快捷键组合不再误触发录音</strong>：快捷键设为 Option、Command 等键时，平时按 ⌥←、⌘C 这类组合键，不会再白白识别一次，也不会弹出「撤销」。</li><li><strong>说完切走窗口，文字不会粘错地方</strong>：识别、整理过程中如果切到了别的 App，文字只放进剪贴板，并提示你按 ⌘V 粘贴，避免发错人。</li><li><strong>口述的文字不再塞满剪贴板历史</strong>：自动粘贴时借用的剪贴板会被标记为临时内容，Maccy、Raycast 等剪贴板工具不会再把每句话都记下来；原来剪贴板里的内容也会还原得更稳。</li><li><strong>「我不太会用英文」不会再被当成口令</strong>：句末出现「用英文」「说英文」这类普通说法时，不会整句被翻译成英文。</li><li><strong>选好的麦克风会被记住</strong>：选中的麦克风拔掉后临时改用系统默认，插回来会自动切回去；录音中途换麦克风也不会让录音变成乱码。</li><li><strong>纠错更准</strong>：学过的纠错词不会再把别的词拦腰改坏（比如学了「徐向 → 徐相」，「徐向前」不会再被改成「徐相前」）。</li><li><strong>提示更准确</strong>：模型没开通时，不会再被误报成「额度用完」。</li></ul><p>感谢开源贡献者 tensorboy 提交了这次的多项修复。</p>]]></description>
+            <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.13/Typefree-3.0.13.dmg" sparkle:edSignature="39KZRY6tya4+N1Iv6m/Cp4VvX3yst7gK2cYG7l1KBUw3R6Nkdgike7/z6/f2g0CNfd+A0uYC10lfRjYQTtM6Aw==" length="2828872" type="application/octet-stream"/>
+        </item>
     </channel>
 </rss>
