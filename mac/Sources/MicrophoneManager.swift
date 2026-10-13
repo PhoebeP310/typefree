@@ -32,7 +32,16 @@ final class MicrophoneManager {
     private let config = VoicePolishConfig.shared
 
     private(set) var devices: [Device] = []
-    private(set) var selectedUID: String = MicrophoneManager.systemDefaultUID
+    /// 用户选的麦克风（持久化）。设备暂时拔掉也不清掉，插回来自动接着用（工单 #1031）。
+    private(set) var preferredUID: String = MicrophoneManager.systemDefaultUID
+
+    /// 当前实际生效的选择：选的设备在就用它，暂时不在就跟随系统默认。
+    var selectedUID: String {
+        if preferredUID != Self.systemDefaultUID, !devices.contains(where: { $0.uid == preferredUID }) {
+            return Self.systemDefaultUID
+        }
+        return preferredUID
+    }
 
     private init() {
         loadSelection()
@@ -72,8 +81,8 @@ final class MicrophoneManager {
 
     /// 选择一个设备（uid == systemDefaultUID 表示跟随系统）
     func select(uid: String) {
-        guard uid != selectedUID else { return }
-        selectedUID = uid
+        guard uid != preferredUID else { return }
+        preferredUID = uid
         saveSelection()
         NotificationCenter.default.post(name: .voicePolishMicrophoneSelectionDidChange, object: nil)
     }
@@ -92,14 +101,14 @@ final class MicrophoneManager {
 
     private func loadSelection() {
         if let uid = config.loadConfig()[configKey] as? String, !uid.isEmpty {
-            selectedUID = uid
+            preferredUID = uid
         } else {
-            selectedUID = Self.systemDefaultUID
+            preferredUID = Self.systemDefaultUID
         }
     }
 
     private func saveSelection() {
-        config.save(values: [configKey: selectedUID])
+        config.save(values: [configKey: preferredUID])
     }
 
     // MARK: - 设备枚举
@@ -108,13 +117,11 @@ final class MicrophoneManager {
     func refreshDevices() {
         let newList = enumerateInputDevices()
         let changed = newList != devices
+        let effectiveBefore = selectedUID
         devices = newList
         if changed {
-            // 如果选中的麦克风被拔掉了，回退到系统默认
-            if selectedUID != Self.systemDefaultUID,
-               !devices.contains(where: { $0.uid == selectedUID }) {
-                selectedUID = Self.systemDefaultUID
-                saveSelection()
+            // 选的麦克风拔掉 → 临时跟随系统默认；插回来 → 自动切回。用户的选择本身不改（原先会被存成「系统默认」，插回来就忘了）
+            if selectedUID != effectiveBefore {
                 NotificationCenter.default.post(name: .voicePolishMicrophoneSelectionDidChange, object: nil)
             }
             NotificationCenter.default.post(name: .voicePolishMicrophoneListDidChange, object: nil)
