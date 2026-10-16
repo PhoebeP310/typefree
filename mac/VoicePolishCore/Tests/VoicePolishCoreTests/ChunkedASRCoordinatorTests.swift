@@ -47,11 +47,11 @@ final class ChunkedASRCoordinatorTests: XCTestCase {
                 lock.lock()
                 inFlight -= 1
                 lock.unlock()
-                completion(.success("\(index),"))
+                completion(.success("段\(index)，"))
             }
         }, completion: { result in
             if case .success(let text) = result {
-                XCTAssertEqual(text, "0,1,2,3,4,5,6,7,8,9,")
+                XCTAssertEqual(text, "段0，段1，段2，段3，段4，段5，段6，段7，段8，段9，")
             } else {
                 XCTFail("should succeed")
             }
@@ -137,12 +137,12 @@ final class ChunkedASRCoordinatorTests: XCTestCase {
                 if index == 1 && attempt == 1 {
                     completion(.failure(CloudASRTranscriber.TranscriptionError.serverBusy(message: "繁忙")))
                 } else {
-                    completion(.success("\(index)"))
+                    completion(.success("段\(index)"))
                 }
             }
         }, completion: { result in
             if case .success(let text) = result {
-                XCTAssertEqual(text, "012")
+                XCTAssertEqual(text, "段0段1段2")
             } else {
                 XCTFail("should succeed after retry")
             }
@@ -216,5 +216,23 @@ final class ChunkedASRCoordinatorTests: XCTestCase {
         lock.lock()
         XCTAssertEqual(attempts[2], 1, "业务性失败不应重试")
         lock.unlock()
+    }
+
+    /// 英文分段拼接要补空格，不能粘成 "today.I think"
+    func testEnglishChunksJoinedWithSpace() {
+        let (samples, ranges) = fixture(chunks: 3)
+        let texts = ["Thank you for coming today. ", "I think it works", "much better."]
+        let exp = expectation(description: "done")
+        ChunkedASRCoordinator.run(samples: samples, ranges: ranges, maxConcurrent: 3, transcribeChunk: { index, _, completion in
+            DispatchQueue.global().async { completion(.success(texts[index])) }
+        }, completion: { result in
+            if case .success(let text) = result {
+                XCTAssertEqual(text, "Thank you for coming today. I think it works much better.")
+            } else {
+                XCTFail("should succeed")
+            }
+            exp.fulfill()
+        })
+        wait(for: [exp], timeout: 5)
     }
 }

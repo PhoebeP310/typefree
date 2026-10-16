@@ -70,13 +70,20 @@ public final class VoicePolishPipeline {
 
     /// 只有还在处理的那一次才回调 UI；结束态（done/error/empty）回调后这一次就算结束
     private func emit(_ state: State, _ entryID: String) {
-        guard isActive(entryID) else {
+        let isTerminal: Bool
+        switch state {
+        case .done, .error, .empty: isTerminal = true
+        case .transcribing, .polishing: isTerminal = false
+        }
+        // 「是不是这一次」和「结束这一次」在同一把锁里做完：分两步的话，中间用户取消并开始了下一次，
+        // 这里会把下一次的标记清掉，下一次的结果就被当成已取消丢掉了。
+        activeLock.lock()
+        let active = activeEntryID == entryID
+        if active && isTerminal { activeEntryID = nil }
+        activeLock.unlock()
+        guard active else {
             log("Pipeline result dropped (cancelled): \(Self.stateName(state))")
             return
-        }
-        switch state {
-        case .done, .error, .empty: _ = cancelCurrent()
-        case .transcribing, .polishing: break
         }
         onStateChange?(state)
     }
@@ -223,10 +230,9 @@ public final class VoicePolishPipeline {
         // 其它失败：如实报错，不自动切换识别版本。
         let message = asrError?.errorDescription ?? "云端识别失败"
         // 识别失败的录音不论长短都留进历史（可「重试」），避免用户白说（工单 #1024：原先只留 ≥20s 的，18 秒的话就丢了）。
-        if preserveFailedAttempt(samples: samples, entryID: entryID, pipelineStart: pipelineStart) {
-            emit(.error(message: "\(message) · 录音已存进历史，可点「···」→「重试」"), entryID)
-        } else {
-            emit(.error(message: message), entryID)
+        // 真的存进历史了才提示「已存进历史」（关了保存历史 / 钥匙串读不出时不能这么说）
+        preserveFailedAttempt(samples: samples, entryID: entryID, pipelineStart: pipelineStart) { [weak self] saved in
+            self?.emit(.error(message: saved ? "\(message) · 录音已存进历史，可点「···」→「重试」" : message), entryID)
         }
     }
 
@@ -406,31 +412,38 @@ public final class VoicePolishPipeline {
         }
     }
 
-    /// 识别失败时，把音频留进历史并标记为可重试，避免用户白录。返回是否会保留（有 audioSaver）。
-    /// 依赖 audioSaver（macOS 有、iOS 为 nil）；编码失败 / 关闭保留 则不留。
-    @discardableResult
-    private func preserveFailedAttempt(samples: [Float], entryID: String, pipelineStart: Date) -> Bool {
-        guard let saver = audioSaver else { return false }
+    /// 识别失败时，把音频留进历史并标记为可重试，避免用户白录。
+    /// 后台存完再回调（在后台线程）：音频和历史都真的写进去了才是 true——
+    /// 没有 audioSaver（iOS）、编码失败、关了「保存历史」、加密不可用都是 false，调用方据此决定提不提「已存进历史」。
+    private func preserveFailedAttempt(samples: [Float], entryID: String, pipelineStart: Date,
+                                       completion: @escaping (_ saved: Bool) -> Void) {
+        guard let saver = audioSaver else { completion(false); return }
         let durationMs = Int(Date().timeIntervalSince(pipelineStart) * 1000)
+        let polisher = aiPolisher
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            guard let self = self else { return }
-            guard let audioFile = saver(samples, entryID) else { return }
-            self.aiPolisher.writePolishLog(
+            guard let audioFile = saver(samples, entryID) else {
+                self?.log("Failed recording not preserved: audio save failed")
+                completion(false)
+                return
+            }
+            let saved = polisher.writePolishLog(
                 asr: "",
                 output: "（这段录音识别失败，点右侧「···」→「重试」可重新识别）",
                 durationMs: durationMs,
                 id: entryID,
                 audioFile: audioFile
             )
-            self.log("Preserved failed recording to history (\(audioFile)) for retry")
+            self?.log(saved ? "Preserved failed recording to history (\(audioFile)) for retry"
+                            : "Failed recording not preserved: history write skipped")
+            completion(saved)
         }
-        return true
     }
 
-    /// 调用方放弃了这次识别（总等待封顶到点）：录音另存一条「识别失败、可重试」的历史。返回是否会保留。
+    /// 调用方放弃了这次识别（总等待封顶到点）：录音另存一条「识别失败、可重试」的历史，存完回调是否真的存上（后台线程）。
     /// 调用方应先 cancelCurrent()，免得这一次过后又自己写一条。
-    public func preserveFailedRecording(samples: [Float], startedAt: Date) -> Bool {
-        preserveFailedAttempt(samples: samples, entryID: UUID().uuidString, pipelineStart: startedAt)
+    public func preserveFailedRecording(samples: [Float], startedAt: Date,
+                                        completion: @escaping (_ saved: Bool) -> Void) {
+        preserveFailedAttempt(samples: samples, entryID: UUID().uuidString, pipelineStart: startedAt, completion: completion)
     }
 
     // MARK: - 工具方法

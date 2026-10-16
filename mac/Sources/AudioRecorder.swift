@@ -397,6 +397,8 @@ class AudioRecorder {
             try check(status, "AudioOutputUnitStart")
             NSLog("[AudioRecorder] AUHAL started on device ID=%d, sampleRate=%.0f", Int(deviceID), sampleRate)
         } catch {
+            // 启动失败时这里已释放 unit：必须先清掉引用，否则外层/下次 stopAUHAL() 会对它再释放一次 → 闪退
+            inputAudioUnit = nil
             AudioComponentInstanceDispose(unit)
             auhalFormat = nil
             throw error

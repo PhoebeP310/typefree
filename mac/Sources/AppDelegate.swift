@@ -1866,12 +1866,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, SettingsWindowDelegate, SPUU
                 self.pipeline.processTranscribedText(partial, samples: samples, mode: self.processingMode)
                 return
             }
-            let kept = self.pipeline.preserveFailedRecording(samples: samples, startedAt: self.processingStartedAt)
             self.endProcessing()
             self.isProcessing = false
             self.statusBar.setTitle("VP")
-            self.showError(kept ? "网络太慢，这段没识别出来 · 录音已存进历史，可点「···」→「重试」"
-                                : "网络太慢，这段没识别出来，请再说一次")
+            // 存完（音频+历史都写上）才知道能不能说「已存进历史」；这期间用户若已开始新的录音/处理，就别拿旧提示盖住
+            self.pipeline.preserveFailedRecording(samples: samples, startedAt: self.processingStartedAt) { [weak self] kept in
+                DispatchQueue.main.async {
+                    guard let self, !self.isRecording, !self.isProcessing else { return }
+                    self.showError(kept ? "网络太慢，这段没识别出来 · 录音已存进历史，可点「···」→「重试」"
+                                        : "网络太慢，这段没识别出来，请再说一次")
+                }
+            }
         }
         recognitionWatchdog = work
         DispatchQueue.main.asyncAfter(deadline: .now() + cap, execute: work)

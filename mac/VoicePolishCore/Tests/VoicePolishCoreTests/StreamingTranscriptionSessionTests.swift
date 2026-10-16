@@ -59,7 +59,7 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
         let lock = NSLock()
         let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
             lock.lock(); commitCount += 1; lock.unlock()
-            DispatchQueue.global().async { done(.success("C")) }
+            DispatchQueue.global().async { done(.success("段")) }
         }, tailTranscriber: { _, done in
             DispatchQueue.global().async { done(.success("尾")) }
         })
@@ -72,9 +72,9 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
         let exp = expectation(description: "finish")
         session.finish(finalSamples: snapshot) { result in
             guard case .success(let text) = result else { return XCTFail("should succeed") }
-            // 结果 = 若干个 "C" + "尾"，顺序正确
+            // 结果 = 若干个 "段" + "尾"，顺序正确
             XCTAssertTrue(text.hasSuffix("尾"))
-            XCTAssertEqual(text, String(repeating: "C", count: text.count - 1) + "尾")
+            XCTAssertEqual(text, String(repeating: "段", count: text.count - 1) + "尾")
             exp.fulfill()
         }
         wait(for: [exp], timeout: 3)
@@ -89,7 +89,7 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
         var tailCalls = 0
         let lock = NSLock()
         let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
-            DispatchQueue.global().async { done(.success("C")) }
+            DispatchQueue.global().async { done(.success("段")) }
         }, tailTranscriber: { _, done in
             lock.lock(); tailCalls += 1; let n = tailCalls; lock.unlock()
             DispatchQueue.global().async { done(n == 1 ? .failure(FakeError()) : .success("尾")) }
@@ -109,7 +109,7 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
     /// 尾巴两次都失败、前面已有文字 → 不再悄悄当成功，交出前半段让上层提醒
     func testTailFailsTwiceReturnsPartialError() {
         let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
-            DispatchQueue.global().async { done(.success("C")) }
+            DispatchQueue.global().async { done(.success("段")) }
         }, tailTranscriber: { _, done in
             DispatchQueue.global().async { done(.failure(FakeError())) }
         })
@@ -123,7 +123,7 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
                 return XCTFail("应返回 PartialResultError")
             }
             XCTAssertFalse(partial.text.isEmpty)
-            XCTAssertEqual(partial.text, String(repeating: "C", count: partial.text.count))
+            XCTAssertEqual(partial.text, String(repeating: "段", count: partial.text.count))
             exp.fulfill()
         }
         wait(for: [exp], timeout: 3)
@@ -134,7 +134,7 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
         var tailCalls = 0
         let lock = NSLock()
         let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
-            DispatchQueue.global().async { done(.success("C")) }
+            DispatchQueue.global().async { done(.success("段")) }
         }, tailTranscriber: { _, done in
             lock.lock(); tailCalls += 1; lock.unlock()
             DispatchQueue.global().async { done(.failure(FakeError())) }
@@ -328,7 +328,7 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
         var releaseCommit: (() -> Void)?
         let session = StreamingTranscriptionSession(chunkTranscriber: { _, done in
             commitStarted.fulfill()
-            releaseCommit = { done(.success("C")) }  // 手动控制何时完成
+            releaseCommit = { done(.success("段")) }  // 手动控制何时完成
         }, tailTranscriber: { _, done in
             DispatchQueue.global().async { done(.success("尾")) }
         })
@@ -341,7 +341,7 @@ final class StreamingTranscriptionSessionTests: XCTestCase {
         session.finish(finalSamples: snapshot) { result in
             finishReturnedEarly = false
             guard case .success(let text) = result else { return XCTFail() }
-            XCTAssertEqual(text, "C尾")  // 在途段先入，再接尾巴
+            XCTAssertEqual(text, "段尾")  // 在途段先入，再接尾巴
             finished.fulfill()
         }
         // 在途段还没放行，finish 不应先返回

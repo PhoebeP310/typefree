@@ -899,7 +899,9 @@ public class AIPolisher {
 
     // MARK: - 日志
 
-    public func writePolishLog(asr: String, output: String, durationMs: Int, inputTokens: Int = 0, outputTokens: Int = 0, id: String? = nil, audioFile: String? = nil) {
+    /// 返回这条是否真的写进了历史（关了「保存历史」、加密不可用、写文件失败都返回 false）
+    @discardableResult
+    public func writePolishLog(asr: String, output: String, durationMs: Int, inputTokens: Int = 0, outputTokens: Int = 0, id: String? = nil, audioFile: String? = nil) -> Bool {
         let entry = makePolishLogEntry(
             asr: asr,
             output: output,
@@ -911,14 +913,14 @@ public class AIPolisher {
         )
 
         // 写入本地记录文件（不外传）
-        appendToPendingLog(entry)
+        return appendToPendingLog(entry)
     }
 
     /// 问 AI 的一轮问答写进历史（问题存 asr、回答存 output），同一话题共用 thread
     public func writeAskLog(question: String, answer: String, thread: String, durationMs: Int) {
         let entry = makePolishLogEntry(asr: question, output: answer, durationMs: durationMs, inputTokens: 0, outputTokens: 0,
                                        id: UUID().uuidString, audioFile: nil, kind: "ask", thread: thread)
-        appendToPendingLog(entry)
+        _ = appendToPendingLog(entry)
     }
 
     func makePolishLogEntry(asr: String, output: String, durationMs: Int, inputTokens: Int, outputTokens: Int, id: String? = nil, audioFile: String? = nil, kind: String? = nil, thread: String? = nil) -> PolishLog {
@@ -953,11 +955,11 @@ public class AIPolisher {
             .appendingPathComponent("polish_log_pending.jsonl")
     }
 
-    private func appendToPendingLog(_ entry: PolishLog) {
+    private func appendToPendingLog(_ entry: PolishLog) -> Bool {
         // 「不保存数据」：文字不落盘，连刚生成的音频也一并删掉，避免留下孤儿文件
         if Self.currentHistoryRetention() == .off {
             AudioClipStore.defaultStore().delete(fileName: entry.audioFile)
-            return
+            return false
         }
 
         guard let enc = HistoryCrypto.defaultEncryptor(),
@@ -965,30 +967,33 @@ public class AIPolisher {
               let lineData = (encryptedLine + "\n").data(using: .utf8) else {
             AudioClipStore.defaultStore().delete(fileName: entry.audioFile)
             NSLog("[history] encryption unavailable, skipping history record")
-            return
+            return false
         }
 
-        guard let logFile = Self.historyLogFileURL() else { return }
+        guard let logFile = Self.historyLogFileURL() else { return false }
         let audioStore = AudioClipStore.defaultStore()
         let retention = Self.currentHistoryRetention()
 
         // 追加 + 裁剪在同一把锁里：设置窗那边的整文件重写若插在中间，这条就丢了。
-        HistoryFileLock.withLock {
+        return HistoryFileLock.withLock {
             try? FileManager.default.createDirectory(at: logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
 
+            var written = false
             if FileManager.default.fileExists(atPath: logFile.path) {
                 if let handle = try? FileHandle(forWritingTo: logFile) {
                     handle.seekToEndOfFile()
                     handle.write(lineData)
                     handle.closeFile()
+                    written = true
                 }
             } else {
-                try? lineData.write(to: logFile)
+                written = (try? lineData.write(to: logFile)) != nil
             }
 
             Self.pruneLogFile(at: logFile, retention: retention, encryptor: enc) { removed in
                 audioStore.delete(fileName: removed.audioFile)  // 裁剪过期记录时一并删音频
             }
+            return written
         }
     }
 

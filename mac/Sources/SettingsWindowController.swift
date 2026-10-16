@@ -2391,6 +2391,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             .shift,
             .fn,
             .rightCommand,
+            .rightOption,
+            .rightControl,
         ] {
             let isSelected: Bool
             if case .modifier(let selectedModifier) = currentShortcut {

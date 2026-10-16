@@ -41,6 +41,10 @@ enum RecordingHotkeyModifier: String, CaseIterable {
     case shift
     case fn
     case rightCommand
+    // 只认右边那个键：左边的常拿来按快捷键，选单个 Option/Control 容易误触发（工单 #1040）。
+    // Mac 自带键盘没有右 Control，只有外接键盘有。
+    case rightOption
+    case rightControl
 
     static let configKey = "recording_hotkey_modifier"
 
@@ -57,14 +61,16 @@ enum RecordingHotkeyModifier: String, CaseIterable {
         case .shift: return "Shift"
         case .fn: return "Fn"
         case .rightCommand: return "右 Command"
+        case .rightOption: return "右 Option"
+        case .rightControl: return "右 Control"
         }
     }
 
     var symbol: String {
         switch self {
-        case .option: return "⌥"
+        case .option, .rightOption: return "⌥"
         case .command, .rightCommand: return "⌘"
-        case .control: return "⌃"
+        case .control, .rightControl: return "⌃"
         case .shift: return "⇧"
         case .fn: return "fn"
         }
@@ -76,9 +82,9 @@ enum RecordingHotkeyModifier: String, CaseIterable {
 
     var symbolName: String {
         switch self {
-        case .option: return "option"
+        case .option, .rightOption: return "option"
         case .command, .rightCommand: return "command"
-        case .control: return "control"
+        case .control, .rightControl: return "control"
         case .shift: return "shift"
         case .fn: return "function"
         }
@@ -86,9 +92,9 @@ enum RecordingHotkeyModifier: String, CaseIterable {
 
     var eventFlag: NSEvent.ModifierFlags {
         switch self {
-        case .option: return .option
+        case .option, .rightOption: return .option
         case .command, .rightCommand: return .command
-        case .control: return .control
+        case .control, .rightControl: return .control
         case .shift: return .shift
         case .fn: return .function
         }
@@ -96,18 +102,28 @@ enum RecordingHotkeyModifier: String, CaseIterable {
 
     var cgFlag: CGEventFlags {
         switch self {
-        case .option: return .maskAlternate
+        case .option, .rightOption: return .maskAlternate
         case .command, .rightCommand: return .maskCommand
-        case .control: return .maskControl
+        case .control, .rightControl: return .maskControl
         case .shift: return .maskShift
         case .fn: return .maskSecondaryFn
         }
     }
 
+    /// 只认右边那个键时，右键的物理键码（右 Command 54、右 Option 61、右 Control 62）；其余不分左右，返回 nil。
+    var rightSideKeyCode: UInt16? {
+        switch self {
+        case .rightCommand: return 54
+        case .rightOption: return 61
+        case .rightControl: return 62
+        default: return nil
+        }
+    }
+
     func matches(_ event: NSEvent) -> Bool {
         guard event.modifierFlags.contains(eventFlag) else { return false }
-        if self == .rightCommand {
-            return event.keyCode == 54 || Self.currentPhysicalKeyCode() == 54
+        if let code = rightSideKeyCode {
+            return event.keyCode == code || Self.currentPhysicalKeyCode() == code
         }
         return true
     }
@@ -115,9 +131,9 @@ enum RecordingHotkeyModifier: String, CaseIterable {
     static func capture(from event: NSEvent) -> RecordingHotkeyModifier? {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
         let allowed: [(NSEvent.ModifierFlags, RecordingHotkeyModifier)] = [
-            (.option, .option),
+            (.option, event.keyCode == 61 ? .rightOption : .option),
             (.command, event.keyCode == 54 ? .rightCommand : .command),
-            (.control, .control),
+            (.control, event.keyCode == 62 ? .rightControl : .control),
             (.shift, .shift),
             (.function, .fn),
         ]
@@ -400,14 +416,25 @@ class HotkeyManager {
         lastProcessedModifierDown = modifierDown
 
         let rawFlags = event.modifierFlags.rawValue
+        let occurredAt = Self.occurredAt(event, now: now)
 
-        debugLog?("flagsChanged: modifier=\(configuredModifier.rawValue) down=\(modifierDown) wasDown=\(wasModifierDown) state=\(gestureState.debugName) tapToggle=\(tapToggleEnabled) rawFlags=\(String(rawFlags, radix: 16)) keyCode=\(event.keyCode)")
+        debugLog?("flagsChanged: modifier=\(configuredModifier.rawValue) down=\(modifierDown) wasDown=\(wasModifierDown) state=\(gestureState.debugName) tapToggle=\(tapToggleEnabled) rawFlags=\(String(rawFlags, radix: 16)) keyCode=\(event.keyCode) lag=\(String(format: "%.3f", now - occurredAt))")
 
         if modifierDown && !wasModifierDown {
-            handleModifierPress(at: now)
+            handleModifierPress(at: occurredAt)
         } else if !modifierDown && wasModifierDown {
-            confirmModifierRelease()
+            confirmModifierRelease(at: occurredAt)
         }
+    }
+
+    /// 按键真正发生的时刻（事件自带的时间，和 systemUptime 同一个钟）。
+    /// 不能用「处理这个事件的时刻」：按下后开麦克风、放提示音时主线程会卡 0.4～0.9 秒，
+    /// 这期间的松手要等卡完才处理，按处理时刻算时长，快速点按会被算成 0.8 秒、误判成长按，松手就停（工单 #1041）。
+    /// 事件时间看着不对劲（没有、在未来、或比现在早太多）就退回处理时刻，等于旧行为。
+    private static func occurredAt(_ event: NSEvent, now: TimeInterval) -> TimeInterval {
+        let t = event.timestamp
+        guard t > 0, t <= now, now - t < 5 else { return now }
+        return t
     }
 
     private func handleKeyEvent(_ event: NSEvent) {
@@ -442,7 +469,7 @@ class HotkeyManager {
             lastProcessedShortcutDown = true
             debugLog?("custom keyDown: shortcut=\(shortcut.displayName) wasDown=\(wasModifierDown) state=\(gestureState.debugName) tapToggle=\(tapToggleEnabled)")
             if !wasModifierDown {
-                handleModifierPress(at: now)
+                handleModifierPress(at: Self.occurredAt(event, now: now))
             }
             return
         }
@@ -474,9 +501,10 @@ class HotkeyManager {
         if now - lastShortcutEventTime < 0.05 && !lastProcessedShortcutDown { return }
         lastShortcutEventTime = now
         lastProcessedShortcutDown = false
-        debugLog?("custom keyUp: shortcut=\(shortcut.displayName) wasDown=\(wasModifierDown) state=\(gestureState.debugName)")
+        let occurredAt = Self.occurredAt(event, now: now)
+        debugLog?("custom keyUp: shortcut=\(shortcut.displayName) wasDown=\(wasModifierDown) state=\(gestureState.debugName) lag=\(String(format: "%.3f", now - occurredAt))")
         if wasModifierDown {
-            confirmModifierRelease()
+            confirmModifierRelease(at: occurredAt)
         }
     }
 
@@ -542,13 +570,13 @@ class HotkeyManager {
         )
     }
 
-    private func confirmModifierRelease() {
+    /// `releasedAt`：松手真正发生的时刻（事件自带的时间，见 occurredAt）。
+    private func confirmModifierRelease(at releasedAt: TimeInterval) {
         pendingStopWorkItem?.cancel()
         // 立即记下真实松手时刻（早于防抖确认）。用于按真实时长判定单击/长按，
         // 并在确认窗口内压制 hold 升级（见 scheduleHoldPromotion 的 releaseObservedAt 守卫）。
-        let now = ProcessInfo.processInfo.systemUptime
-        releaseObservedAt = now
-        let isEarlyInPress = pressStartedAt.map { now - $0 < RecordingHotkeyBehavior.earlyPressWindow } ?? false
+        releaseObservedAt = releasedAt
+        let isEarlyInPress = pressStartedAt.map { releasedAt - $0 < RecordingHotkeyBehavior.earlyPressWindow } ?? false
         let confirmDelay = isEarlyInPress
             ? RecordingHotkeyBehavior.earlyReleaseConfirmDelay
             : RecordingHotkeyBehavior.releaseConfirmDelay

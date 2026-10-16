@@ -651,7 +651,7 @@ public final class CloudASRTranscriber {
                 (u["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             }.filter { !$0.isEmpty }
             if !sentences.isEmpty {
-                return PersonalVocabulary.removingContextEcho(sentences.joined(separator: ""))
+                return PersonalVocabulary.removingContextEcho(TranscriptJoiner.join(sentences))
             }
         }
         if let text = (result["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),

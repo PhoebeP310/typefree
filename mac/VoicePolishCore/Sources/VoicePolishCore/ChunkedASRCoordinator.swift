@@ -133,9 +133,7 @@ final class ChunkedASRCoordinator {
         /// 顺序处理待恢复段：并入相邻存活段（优先前一段，否则后一段）重识别。
         func recoverNext(targets: [Int], cursor: Int) {
             guard cursor < targets.count else {
-                let joined = results.compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                    .joined(separator: "")
+                let joined = TranscriptJoiner.join(results.compactMap { $0 })
                 finish(with: .success(joined))
                 return
             }
