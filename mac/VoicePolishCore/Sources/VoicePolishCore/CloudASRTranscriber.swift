@@ -579,7 +579,8 @@ public final class CloudASRTranscriber {
             }
             if let choices = json["choices"] as? [[String: Any]],
                let message = choices.first?["message"] as? [String: Any] {
-                let content = (message["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let raw = (message["content"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                let content = raw.isEmpty ? "" : (PersonalVocabulary.removingContextEcho(raw) ?? "")
                 if !content.isEmpty {
                     completion(.success(content))
                 } else {
@@ -650,12 +651,12 @@ public final class CloudASRTranscriber {
                 (u["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             }.filter { !$0.isEmpty }
             if !sentences.isEmpty {
-                return sentences.joined(separator: "")
+                return PersonalVocabulary.removingContextEcho(TranscriptJoiner.join(sentences))
             }
         }
         if let text = (result["text"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !text.isEmpty {
-            return text
+            return PersonalVocabulary.removingContextEcho(text)
         }
         return nil
     }

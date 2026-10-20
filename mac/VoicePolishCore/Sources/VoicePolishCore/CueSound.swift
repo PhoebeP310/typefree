@@ -22,9 +22,18 @@ public enum CueSound {
         case woodfish  // 本地改动：低音木鱼，空心木头的「笃」
         case goStone   // 本地改动：围棋落子，石子「啪」+ 棋盘闷响
         case cork      // 本地改动：软木塞「啵」，音高往下滑
+        // 本地改动（2026-10-20）：再加 8 种，乐音 4 + 敲击 4
+        case minorThird // 小三度：比大三度更柔、更安静
+        case triad      // 三音琶音：开始往上走三步，结束往下走三步
+        case kalimba    // 拇指琴：短促、带一点金属片的余韵
+        case bowl       // 颂钵：低沉单音，两个相近频率叠出缓慢的「嗡」拍音
+        case handDrum   // 手鼓：皮面的「咚」，音高略往下沉
+        case bamboo     // 竹梆子：空心竹子的「梆」，比木鱼更脆更短
+        case waterDrop  // 水滴：「噗咚」，音高往上挑
+        case xiangqi    // 象棋落子：木头棋子拍在木棋盘上
 
         /// 本地改动：敲击类（非乐音）
-        public var isPercussive: Bool { [.knock, .mahjong, .woodfish, .goStone, .cork].contains(self) }
+        public var isPercussive: Bool { Hit.preset(self) != nil }
 
         public var displayName: String {
             switch self {
@@ -37,6 +46,14 @@ public enum CueSound {
             case .woodfish: return "低音木鱼"
             case .goStone: return "围棋落子"
             case .cork: return "软木塞"
+            case .minorThird: return "小三度双音"
+            case .triad: return "三音琶音"
+            case .kalimba: return "拇指琴"
+            case .bowl: return "颂钵"
+            case .handDrum: return "手鼓"
+            case .bamboo: return "竹梆子"
+            case .waterDrop: return "水滴"
+            case .xiangqi: return "象棋落子"
             }
         }
     }
@@ -79,17 +96,36 @@ public enum CueSound {
         } else {
             // 音高（Hz）。双音：开始 = 低→高，结束 = 高→低
             let notes: [Double]
+            var gap = noteGap
+            var decays = (0.05, 0.065)              // (前面的音, 最后一个音)
+            var partials: [(Double, Double)] = []   // 本地改动：额外泛音 (倍数, 振幅)
+            var detune = 0.0                        // 本地改动：叠一个相差 detune Hz 的音，产生拍音
             switch style {
             case .fourth: notes = up ? [440.0, 587.33] : [440.0, 329.63]     // A4→D5 / A4→E4
             case .fifth:  notes = up ? [349.23, 523.25] : [523.25, 349.23]   // F4→C5 / C5→F4
             case .third:  notes = up ? [311.13, 392.0] : [392.0, 311.13]     // E♭4→G4 / G4→E♭4
             case .single: notes = up ? [587.33] : [440.0]                    // D5 / A4
-            case .knock, .mahjong, .woodfish, .goStone, .cork: notes = []
+            case .minorThird: notes = up ? [349.23, 415.30] : [415.30, 349.23]  // F4→A♭4
+            case .triad:                                                     // G4→B4→D5
+                notes = up ? [392.0, 493.88, 587.33] : [587.33, 493.88, 392.0]
+                gap = 0.085
+                decays = (0.045, 0.07)
+            case .kalimba:                                                   // G4→C5，簧片的非谐泛音
+                notes = up ? [392.0, 523.25] : [523.25, 392.0]
+                decays = (0.04, 0.05)
+                partials = [(2.4, 0.06)]
+            case .bowl:                                                      // G4 / E4 单音，长尾
+                notes = up ? [392.0] : [329.63]
+                decays = (0.18, 0.18)
+                partials = [(2.7, 0.08)]
+                detune = 2.5
+            default: notes = []
             }
             for (i, f) in notes.enumerated() {
                 let isLast = i == notes.count - 1
-                addNote(&dry, freq: f, at: lead + Double(i) * noteGap,
-                        amp: isLast ? 1.0 : 0.85, decay: isLast ? 0.065 : 0.05)
+                addNote(&dry, freq: f, at: lead + Double(i) * gap,
+                        amp: isLast ? 1.0 : 0.85, decay: isLast ? decays.1 : decays.0,
+                        partials: partials, detune: detune)
             }
         }
         var (wl, wr) = reverb(dry)
@@ -116,7 +152,8 @@ public enum CueSound {
     // MARK: - 合成小工具
 
     /// 一个近乎纯正弦的音：2ms 起音、指数衰减；叠一丝二次谐波（-30dB）让它不那么「电子」。
-    static func addNote(_ buf: inout [Float], freq: Double, at start: Double, amp: Double, decay: Double) {
+    static func addNote(_ buf: inout [Float], freq: Double, at start: Double, amp: Double, decay: Double,
+                        partials: [(Double, Double)] = [], detune: Double = 0) {
         let s0 = Int(start * sampleRate)
         let attack = 0.002
         for i in s0..<buf.count {
@@ -124,7 +161,10 @@ public enum CueSound {
             let env = (t < attack ? t / attack : 1) * exp(-max(0, t - attack) / decay)
             if env < 1e-5 && t > attack { break }
             let ph = 2 * .pi * freq * t
-            buf[i] += Float(amp * env * (sin(ph) + 0.03 * sin(2 * ph)))
+            var v = sin(ph) + 0.03 * sin(2 * ph)
+            for (ratio, a) in partials { v += a * exp(-t / (decay * 0.4)) * sin(ph * ratio) }   // 泛音衰减得更快
+            if detune != 0 { v = (v + sin(2 * .pi * (freq + detune) * t)) / 2 }
+            buf[i] += Float(amp * env * v)
         }
     }
 
@@ -156,6 +196,18 @@ public enum CueSound {
             case .cork:     // 「啵」：音高快速下滑
                 return Hit(modes: [(260, 1.0, 0.040), (520, 0.2, 0.020)],
                            noise: 0.05, noiseMs: 4, lowpass: 1400, length: 0.16, sweep: (2.2, 0.012))
+            case .handDrum: // 皮面：低频为主，音高轻微下沉
+                return Hit(modes: [(190, 1.0, 0.070), (310, 0.5, 0.040), (480, 0.2, 0.020)],
+                           noise: 0.2, noiseMs: 3, lowpass: 1000, length: 0.22, sweep: (1.15, 0.02))
+            case .bamboo:   // 空心竹：中音区，短
+                return Hit(modes: [(560, 1.0, 0.035), (1250, 0.25, 0.010)],
+                           noise: 0.25, noiseMs: 3, lowpass: 1500, length: 0.14, doubleGap: 0.07)
+            case .waterDrop: // 水滴：纯音，音高从一半快速挑上来
+                return Hit(modes: [(620, 1.0, 0.030)],
+                           noise: 0, noiseMs: 1, lowpass: 2000, length: 0.12, sweep: (0.55, 0.015))
+            case .xiangqi:  // 木棋子 + 木棋盘
+                return Hit(modes: [(330, 1.0, 0.040), (820, 0.45, 0.015), (1350, 0.12, 0.006)],
+                           noise: 0.3, noiseMs: 3, lowpass: 1400, length: 0.16, doubleGap: 0.06)
             default:
                 return nil
             }

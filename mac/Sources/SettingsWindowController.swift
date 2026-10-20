@@ -2600,6 +2600,8 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
             .shift,
             .fn,
             .rightCommand,
+            .rightOption,
+            .rightControl,
         ] {
             let isSelected: Bool
             if case .modifier(let selectedModifier) = currentShortcut {
@@ -4176,9 +4178,9 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
 
         // 本地改动：声音样式可选（原来只能改 config 的 cue_sound_style），选中就切过去并试听一下；
-        // 9 种一排放不下，用下拉，名称前缀区分「乐音 / 敲击」两组。
+        // 17 种一排放不下，用下拉，名称前缀区分「乐音 / 敲击」两组，乐音排前面。
         // 本地改动：下拉不再单独占满一整行，改成固定宽度放在开关左边，与「深色模式」「麦克风」行一样控件靠右
-        let items = CueSound.Style.allCases.map { st in
+        let items = (CueSound.Style.allCases.filter { !$0.isPercussive } + CueSound.Style.allCases.filter(\.isPercussive)).map { st in
             VPDropdown.Item(value: st.rawValue, title: (st.isPercussive ? "敲击 · " : "乐音 · ") + st.displayName)
         }
         let seg = VPDropdown(items: items, selectedValue: CuePlayer.shared.style.rawValue,
@@ -4236,10 +4238,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.addArrangedSubview(title)
         textStack.addArrangedSubview(desc)
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 本地改动：去掉文字和开关之间的空白占位。占位和文字都是低 hugging，会抢宽度，
+        // 偶尔把说明文字挤成很窄的一列（开机自启、Dock 卡片）。改成开关不拉伸、文字吃满剩余宽度。
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+        toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -4248,7 +4250,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.spacing = 16
         row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
 
         mount(row, in: card)
@@ -4477,10 +4478,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.addArrangedSubview(title)
         textStack.addArrangedSubview(desc)
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 本地改动：去掉文字和开关之间的空白占位。占位和文字都是低 hugging，会抢宽度，
+        // 偶尔把说明文字挤成很窄的一列（开机自启、Dock 卡片）。改成开关不拉伸、文字吃满剩余宽度。
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+        toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -4489,7 +4490,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.spacing = 16
         row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
         mount(row, in: card)
         return card
@@ -5173,10 +5173,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.addArrangedSubview(title)
         textStack.addArrangedSubview(desc)
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 本地改动：去掉文字和开关之间的空白占位。占位和文字都是低 hugging，会抢宽度，
+        // 偶尔把说明文字挤成很窄的一列（开机自启、Dock 卡片）。改成开关不拉伸、文字吃满剩余宽度。
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+        toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -5185,7 +5185,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.spacing = 16
         row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
 
         mount(row, in: card)
@@ -5210,10 +5209,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.addArrangedSubview(title)
         textStack.addArrangedSubview(desc)
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 本地改动：去掉文字和开关之间的空白占位。占位和文字都是低 hugging，会抢宽度，
+        // 偶尔把说明文字挤成很窄的一列（开机自启、Dock 卡片）。改成开关不拉伸、文字吃满剩余宽度。
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+        toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -5222,7 +5221,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.spacing = 16
         row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
 
         mount(row, in: card)
@@ -5471,10 +5469,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.addArrangedSubview(title)
         textStack.addArrangedSubview(desc)
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 本地改动：去掉文字和开关之间的空白占位。占位和文字都是低 hugging，会抢宽度，
+        // 偶尔把说明文字挤成很窄的一列（开机自启、Dock 卡片）。改成开关不拉伸、文字吃满剩余宽度。
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+        toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -5483,7 +5481,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.spacing = 16
         row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
 
         mount(row, in: card)
@@ -5813,6 +5810,17 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         stack.setCustomSpacing(24, after: retentionCard)
 
         if allHistoryEntries.isEmpty {
+            // 文件里有记录、却一条都解不开：多半是钥匙串读不出解密钥匙（工单 #1034）。
+            // 原先也显示「还没有历史记录」，用户以为记录全丢了，可能顺手点「清空历史」把能找回的记录删掉。
+            let stored = quickHistoryLineCount()
+            if stored > 0 {
+                let keyReadable = HistoryCrypto.defaultEncryptor() != nil
+                delegate.debugLog("[history] \(stored) stored entries, none readable (key readable=\(keyReadable))")
+                stack.addArrangedSubview(makeEmptyState(keyReadable
+                    ? "有 \(stored) 条历史记录暂时读不出来（解密钥匙可能已更换）。记录还在本机，请不要清空历史，可以在「反馈」里联系我们。"
+                    : "有 \(stored) 条历史记录暂时读不出来：没能从系统「钥匙串」取到解密钥匙。记录都还在，请不要清空历史。\n重启电脑后打开 Typefree，系统询问时输入开机密码并点「始终允许」。"))
+                return
+            }
             stack.addArrangedSubview(makeEmptyState("还没有历史记录。完成一次语音输入后，这里会显示最近的转写结果。"))
             return
         }
@@ -7164,10 +7172,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         textStack.addArrangedSubview(title)
         textStack.addArrangedSubview(desc)
         textStack.setHuggingPriority(.defaultLow, for: .horizontal)
-
-        let spacer = NSView()
-        spacer.translatesAutoresizingMaskIntoConstraints = false
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        // 本地改动：去掉文字和开关之间的空白占位。占位和文字都是低 hugging，会抢宽度，
+        // 偶尔把说明文字挤成很窄的一列（开机自启、Dock 卡片）。改成开关不拉伸、文字吃满剩余宽度。
+        toggle.setContentHuggingPriority(.required, for: .horizontal)
+        toggle.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let row = NSStackView()
         row.orientation = .horizontal
@@ -7176,7 +7184,6 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         row.spacing = 16
         row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
         row.addArrangedSubview(textStack)
-        row.addArrangedSubview(spacer)
         row.addArrangedSubview(toggle)
 
         mount(row, in: card)

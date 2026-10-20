@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 public class AIPolisher {
     public enum HistoryRetention: String, CaseIterable {
@@ -140,7 +141,8 @@ public class AIPolisher {
 
     /// 按词库把误写换成正写（2026-09-11 重写，旧版逐条整段替换会改坏正确的字）：
     /// - 已经是正写的地方不动：误写恰好是正写的一部分时（误写 APIK、正写 APIKey），原文里的 APIKey 不能变成 APIKeyey；
-    /// - 英文/数字的误写要整词命中，前后不能紧挨英文字母或数字（SQL 不改 PostgreSQL 的尾巴）；中文没有词边界，照旧；
+    /// - 英文/数字的误写要整词命中，前后不能紧挨英文字母或数字（SQL 不改 PostgreSQL 的尾巴）；
+    /// - 中文误写若会把分词器切出的词拦腰截断（误写「徐向」遇到「徐向前」→ 徐/向前），不改；
     /// - 单遍替换：所有命中都在原文上找，长的误写优先、互不重叠，换进去的正写不会再被别的规则改一遍。
     static func applyTermCorrections(_ corrections: [TermCorrection], to text: String) -> String {
         let pairs = corrections
@@ -150,6 +152,7 @@ public class AIPolisher {
         guard !pairs.isEmpty, !text.isEmpty else { return text }
 
         let source = text as NSString
+        lazy var cjkWordRanges = chineseWordRanges(in: text)
         var accepted: [(range: NSRange, target: String)] = []
         for pair in pairs {
             // 只差大小写的规则（chatgpt → ChatGPT）只改写法不对的地方；其余规则避开原文里已是正写的位置
@@ -157,6 +160,7 @@ public class AIPolisher {
             let correctSpots = caseOnly ? [] : occurrences(of: pair.target, in: source)
             for range in occurrences(of: pair.variant, in: source) {
                 guard isWholeLatinWord(range, variant: pair.variant, in: source) else { continue }
+                if containsCJK(pair.variant), splitsWord(range, wordRanges: cjkWordRanges) { continue }
                 if caseOnly, source.substring(with: range) == pair.target { continue }
                 if correctSpots.contains(where: { NSIntersectionRange($0, range).length > 0 }) { continue }
                 if accepted.contains(where: { NSIntersectionRange($0.range, range).length > 0 }) { continue }
@@ -185,6 +189,31 @@ public class AIPolisher {
             location = found.location + found.length
         }
         return ranges
+    }
+
+    private static func containsCJK(_ s: String) -> Bool {
+        s.unicodeScalars.contains { (0x4E00...0x9FFF).contains($0.value) || (0x3400...0x4DBF).contains($0.value) }
+    }
+
+    /// 分词器切出的多字词（NSRange）。只用来判断命中有没有把某个词切断。
+    private static func chineseWordRanges(in text: String) -> [NSRange] {
+        let tokenizer = NLTokenizer(unit: .word)
+        tokenizer.string = text
+        var ranges: [NSRange] = []
+        tokenizer.enumerateTokens(in: text.startIndex..<text.endIndex) { tokenRange, _ in
+            let r = NSRange(tokenRange, in: text)
+            if r.length > 1 { ranges.append(r) }
+            return true
+        }
+        return ranges
+    }
+
+    /// 命中和某个多字词部分重叠（词的一部分在命中外面）→ 替换会把这个词改坏
+    private static func splitsWord(_ range: NSRange, wordRanges: [NSRange]) -> Bool {
+        wordRanges.contains { word in
+            let overlap = NSIntersectionRange(word, range).length
+            return overlap > 0 && overlap < word.length
+        }
     }
 
     /// 以英文字母/数字开头（结尾）的误写，前（后）一个字符不能也是英文字母/数字，否则是命中了长单词的一部分
@@ -640,11 +669,12 @@ public class AIPolisher {
         }
         debugLog?("Cloud ASR polish qwen attempt model=\(model)")
         callChatCompletionsWithTokens(url: url, apiKey: apiKey, body: makeBody(model)) { [weak self] result in
-            if case .failure(let err) = result, case PolishError.quotaExhausted = err {
-                PolishModelRouter.markExhausted(model)
+            if case .failure(let err) = result, let polishError = err as? PolishError,
+               let cooldown = PolishModelRouter.cooldown(for: polishError) {
+                PolishModelRouter.markExhausted(model, for: cooldown)
                 let rest = Array(candidates.dropFirst())
                 if let self = self, let next = rest.first {
-                    self.debugLog?("Cloud ASR polish qwen: \(model) 额度类失败(403)，自动降级到 \(next)")
+                    self.debugLog?("Cloud ASR polish qwen: \(model) 不可用(403: \(polishError.localizedDescription))，自动降级到 \(next)")
                     self.attemptQwenPolish(candidates: rest, url: url, apiKey: apiKey,
                                            makeBody: makeBody, completion: completion)
                     return
@@ -740,7 +770,7 @@ public class AIPolisher {
                     // 服务端业务错误：把真实原因带出去，别再吞成 parseError。
                     // 403 单独标为额度类失败（免费额度用完即停/欠费），自动路由靠它降级换模型。
                     if (response as? HTTPURLResponse)?.statusCode == 403 {
-                        completion(.failure(PolishError.quotaExhausted(apiMessage)))
+                        completion(.failure(Self.classify403(json: json, message: apiMessage)))
                     } else {
                         completion(.failure(PolishError.apiError(apiMessage)))
                     }
@@ -869,10 +899,15 @@ public class AIPolisher {
                     if !text.isEmpty { TrialManager.shared.recordSelfKeyUsage(chars: text.count) }
                     completion(.success(text))
                 case .failure(let err):
-                    if case PolishError.quotaExhausted = err {
-                        PolishModelRouter.markExhausted(model)
-                        self?.debugLog?("Ask: \(model) 额度类失败，降级到下一个")
-                        attempt(index + 1, search: search)
+                    if let polishError = err as? PolishError, let cooldown = PolishModelRouter.cooldown(for: polishError) {
+                        PolishModelRouter.markExhausted(model, for: cooldown)
+                        self?.debugLog?("Ask: \(model) 不可用(403)，降级到下一个")
+                        // 最后一个候选也失败时保留真实原因，避免又把「未开通」报成「额度用完」。
+                        if index + 1 < candidates.count {
+                            attempt(index + 1, search: search)
+                        } else {
+                            completion(.failure(err))
+                        }
                     } else if search, case PolishError.apiError = err {
                         self?.debugLog?("Ask with enable_search failed, retrying without: \(err)")
                         attempt(index, search: false)
@@ -953,7 +988,7 @@ public class AIPolisher {
             guard statusCode == 200 else {
                 let json = try? JSONSerialization.jsonObject(with: errorBody) as? [String: Any]
                 let message = AIPolisher.extractAPIErrorMessage(from: json) ?? "HTTP \(statusCode)"
-                completion(.failure(statusCode == 403 ? PolishError.quotaExhausted(message) : PolishError.apiError(message)))
+                completion(.failure(statusCode == 403 ? AIPolisher.classify403(json: json, message: message) : PolishError.apiError(message)))
                 return
             }
             let text = accumulated.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -963,7 +998,9 @@ public class AIPolisher {
 
     // MARK: - 日志
 
-    public func writePolishLog(asr: String, output: String, durationMs: Int, inputTokens: Int = 0, outputTokens: Int = 0, id: String? = nil, audioFile: String? = nil) {
+    /// 返回这条是否真的写进了历史（关了「保存历史」、加密不可用、写文件失败都返回 false）
+    @discardableResult
+    public func writePolishLog(asr: String, output: String, durationMs: Int, inputTokens: Int = 0, outputTokens: Int = 0, id: String? = nil, audioFile: String? = nil) -> Bool {
         let entry = makePolishLogEntry(
             asr: asr,
             output: output,
@@ -975,14 +1012,14 @@ public class AIPolisher {
         )
 
         // 写入本地记录文件（不外传）
-        appendToPendingLog(entry)
+        return appendToPendingLog(entry)
     }
 
     /// 问 AI 的一轮问答写进历史（问题存 asr、回答存 output），同一话题共用 thread
     public func writeAskLog(question: String, answer: String, thread: String, durationMs: Int) {
         let entry = makePolishLogEntry(asr: question, output: answer, durationMs: durationMs, inputTokens: 0, outputTokens: 0,
                                        id: UUID().uuidString, audioFile: nil, kind: "ask", thread: thread)
-        appendToPendingLog(entry)
+        _ = appendToPendingLog(entry)
     }
 
     func makePolishLogEntry(asr: String, output: String, durationMs: Int, inputTokens: Int, outputTokens: Int, id: String? = nil, audioFile: String? = nil, kind: String? = nil, thread: String? = nil) -> PolishLog {
@@ -1017,11 +1054,11 @@ public class AIPolisher {
             .appendingPathComponent("polish_log_pending.jsonl")
     }
 
-    private func appendToPendingLog(_ entry: PolishLog) {
+    private func appendToPendingLog(_ entry: PolishLog) -> Bool {
         // 「不保存数据」：文字不落盘，连刚生成的音频也一并删掉，避免留下孤儿文件
         if Self.currentHistoryRetention() == .off {
             AudioClipStore.defaultStore().delete(fileName: entry.audioFile)
-            return
+            return false
         }
 
         guard let enc = HistoryCrypto.defaultEncryptor(),
@@ -1029,30 +1066,33 @@ public class AIPolisher {
               let lineData = (encryptedLine + "\n").data(using: .utf8) else {
             AudioClipStore.defaultStore().delete(fileName: entry.audioFile)
             NSLog("[history] encryption unavailable, skipping history record")
-            return
+            return false
         }
 
-        guard let logFile = Self.historyLogFileURL() else { return }
+        guard let logFile = Self.historyLogFileURL() else { return false }
         let audioStore = AudioClipStore.defaultStore()
         let retention = Self.currentHistoryRetention()
 
         // 追加 + 裁剪在同一把锁里：设置窗那边的整文件重写若插在中间，这条就丢了。
-        HistoryFileLock.withLock {
+        return HistoryFileLock.withLock {
             try? FileManager.default.createDirectory(at: logFile.deletingLastPathComponent(), withIntermediateDirectories: true)
 
+            var written = false
             if FileManager.default.fileExists(atPath: logFile.path) {
                 if let handle = try? FileHandle(forWritingTo: logFile) {
                     handle.seekToEndOfFile()
                     handle.write(lineData)
                     handle.closeFile()
+                    written = true
                 }
             } else {
-                try? lineData.write(to: logFile)
+                written = (try? lineData.write(to: logFile)) != nil
             }
 
             Self.pruneLogFile(at: logFile, retention: retention, encryptor: enc) { removed in
                 audioStore.delete(fileName: removed.audioFile)  // 裁剪过期记录时一并删音频
             }
+            return written
         }
     }
 
@@ -1120,6 +1160,7 @@ public class AIPolisher {
         case parseError
         case apiError(String)   // 服务端返回的业务错误（鉴权/限流等），带真实原因
         case quotaExhausted(String)   // 403 额度类失败（免费额度用完即停/欠费），自动路由靠它降级
+        case modelUnavailable(String) // 403 但不是额度问题（模型未开通 / Key 无此模型权限），也降级，但短冷却、如实报原因
 
         public var errorDescription: String? {
             switch self {
@@ -1128,8 +1169,24 @@ public class AIPolisher {
             case .parseError: return "润色返回无法解析"
             case .apiError(let msg): return msg
             case .quotaExhausted(let msg): return msg
+            case .modelUnavailable(let msg): return "模型未开通或无权限：\(msg)"
             }
         }
+    }
+
+    /// 403 分两种：额度/欠费（当天不会恢复，长冷却）与模型未开通/无权限（用户开通后立刻可用，短冷却）。
+    /// 只按错误码和原文里的额度类关键字判断，认不出的按「未开通」处理——不再把一切 403 都说成额度用完。
+    static func classify403(json: [String: Any]?, message: String) -> PolishError {
+        var haystack = message
+        if let err = json?["error"] as? [String: Any] {
+            haystack += " " + ((err["code"] as? String) ?? "") + " " + ((err["message"] as? String) ?? "")
+        }
+        if let code = json?["code"] as? String { haystack += " " + code }
+        let quotaMarkers = ["quota", "freetier", "free tier", "arrearage", "overdue", "exhausted", "balance",
+                            "额度", "欠费", "余额"]
+        let lower = haystack.lowercased()
+        return quotaMarkers.contains(where: { lower.contains($0) })
+            ? .quotaExhausted(message) : .modelUnavailable(message)
     }
 
     /// 从 OpenAI 兼容 / DashScope 的错误响应里取人话原因：

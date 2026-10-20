@@ -291,5 +291,32 @@
             <description><![CDATA[<h3>提示更准确</h3><ul><li><strong>自带 Key 时不再误报「试用已结束」</strong>：如果「语音识别」选的服务还没填 Key（比如切到了百炼，但只填过火山引擎的 Key），现在会直接告诉你是哪个服务没填，以及可以改选哪个已经填好的；如果系统钥匙串暂时读不出 Key，也会提示你重启后点「允许」。以前这两种情况都会被误报成「试用已结束」。</li></ul>]]></description>
             <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.11/Typefree-3.0.11.dmg" sparkle:edSignature="7u+2YKV6DCNqFVmBSh+2pE+bB12M6QGYT74HJapPNvAIBRpmxaU6VShj8hwnvRFQUgUTqK2Cvfeuqp7oTLeXBw==" length="2817457" type="application/octet-stream"/>
         </item>
+        <item>
+            <title>3.0.12</title>
+            <sparkle:version>3.0.12</sparkle:version>
+            <sparkle:shortVersionString>3.0.12</sparkle:shortVersionString>
+            <pubDate>Mon, 12 Oct 2026 16:21:44 +0000</pubDate>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>修复</h3><ul><li><strong>没说话时不再冒出奇怪的文字</strong>：使用阿里百炼识别、词库里有词时，如果按了快捷键却没说话，以前偶尔会打出一句「用户常说的词：……」。现在不会了，没说话就什么都不输入。</li><li><strong>历史记录读不出来时说清原因</strong>：如果系统钥匙串暂时读不出解密钥匙，历史页会提示「有 N 条记录暂时读不出来、记录都还在」，并告诉你怎么处理。以前会直接显示「还没有历史记录」，容易让人以为记录丢了。</li></ul>]]></description>
+            <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.12/Typefree-3.0.12.dmg" sparkle:edSignature="9hmIKGWfoLjm1LlidcuOBvl2M24LrfNY+Qlb+ZLN5yRpsrl9TAuOT20QG+ZqBS6RVri/KRX5BSuikHEo8xU5Dw==" length="2820489" type="application/octet-stream"/>
+        </item>
+        <item>
+            <title>3.0.13</title>
+            <sparkle:version>3.0.13</sparkle:version>
+            <sparkle:shortVersionString>3.0.13</sparkle:shortVersionString>
+            <pubDate>Tue, 13 Oct 2026 14:07:58 +0000</pubDate>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>修复与改进</h3><ul><li><strong>按快捷键组合不再误触发录音</strong>：快捷键设为 Option、Command 等键时，平时按 ⌥←、⌘C 这类组合键，不会再白白识别一次，也不会弹出「撤销」。</li><li><strong>说完切走窗口，文字不会粘错地方</strong>：识别、整理过程中如果切到了别的 App，文字只放进剪贴板，并提示你按 ⌘V 粘贴，避免发错人。</li><li><strong>口述的文字不再塞满剪贴板历史</strong>：自动粘贴时借用的剪贴板会被标记为临时内容，Maccy、Raycast 等剪贴板工具不会再把每句话都记下来；原来剪贴板里的内容也会还原得更稳。</li><li><strong>「我不太会用英文」不会再被当成口令</strong>：句末出现「用英文」「说英文」这类普通说法时，不会整句被翻译成英文。</li><li><strong>选好的麦克风会被记住</strong>：选中的麦克风拔掉后临时改用系统默认，插回来会自动切回去；录音中途换麦克风也不会让录音变成乱码。</li><li><strong>纠错更准</strong>：学过的纠错词不会再把别的词拦腰改坏（比如学了「徐向 → 徐相」，「徐向前」不会再被改成「徐相前」）。</li><li><strong>提示更准确</strong>：模型没开通时，不会再被误报成「额度用完」。</li></ul><p>感谢开源贡献者 tensorboy 提交了这次的多项修复。</p>]]></description>
+            <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.13/Typefree-3.0.13.dmg" sparkle:edSignature="39KZRY6tya4+N1Iv6m/Cp4VvX3yst7gK2cYG7l1KBUw3R6Nkdgike7/z6/f2g0CNfd+A0uYC10lfRjYQTtM6Aw==" length="2828872" type="application/octet-stream"/>
+        </item>
+        <item>
+            <title>3.0.14</title>
+            <sparkle:version>3.0.14</sparkle:version>
+            <sparkle:shortVersionString>3.0.14</sparkle:shortVersionString>
+            <pubDate>Fri, 16 Oct 2026 15:48:14 +0000</pubDate>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[<h3>新增</h3><ul><li><strong>快捷键可以只认右边的 Option 或 Control</strong>：首页「长按 [键] 开始说话」点中间的键，菜单里新增「右 Option」「右 Control」。左边的键照常拿来按快捷键，不会再误触发语音输入。（Mac 自带键盘没有右 Control，外接键盘才有。）</li></ul><h3>修复</h3><ul><li><strong>单击快捷键开始录音，不会再一两秒就自己停</strong>：按下快捷键时 App 要打开麦克风，偶尔会卡一下，以前会把快速点按误当成「长按」，一松手就停了。现在不管卡没卡，点一下都能保持录音，再点一下才结束。</li><li><strong>英文句子之间不再粘在一起</strong>：说好几句英文时，句子之间的空格会被吞掉，变成「today.I think」这样。关掉 AI 整理的话会直接看到这种结果。现在空格会保留，中文不受影响。</li><li><strong>麦克风启动失败时不再闪退</strong>：选了某个麦克风、它又刚好启动不了（比如刚被拔掉、被别的软件占用），以前 App 可能直接退出，现在只会提示失败。</li><li><strong>识别失败时的提示更准确</strong>：只有录音真的存进了历史，才会提示「录音已存进历史，可点重试」。如果你关了「保存历史」，或历史暂时存不进去，会如实提示，不会再让你以为录音还在。</li></ul>]]></description>
+            <enclosure url="https://github.com/kdsz001/typefree/releases/download/v3.0.14/Typefree-3.0.14.dmg" sparkle:edSignature="oTTA+2aDBl70TRqLsS3DpAsj8QsMq3d0uftt+7cXyGfDRv+y1Sodz7hY+t9eewSq5LJEUj86njFCR8A2QPdeBQ==" length="2794358" type="application/octet-stream"/>
+        </item>
     </channel>
 </rss>

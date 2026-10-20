@@ -174,9 +174,7 @@ public final class StreamingTranscriptionSession {
     }
 
     static func join(_ parts: [String]) -> String {
-        parts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-            .joined()
+        TranscriptJoiner.join(parts)
     }
 
     private func log(_ msg: String) { debugLog?(msg) }
