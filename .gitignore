@@ -1,2 +1,6 @@
 .gstack/
 .DS_Store
+ios/.derived/
+ios/TypefreeiOS.xcodeproj/
+ios/Vendor/
+ios/Keyboard/RimeData/

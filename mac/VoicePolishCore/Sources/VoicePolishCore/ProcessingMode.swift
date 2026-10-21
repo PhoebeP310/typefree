@@ -5,7 +5,7 @@ public enum ProcessingMode: String, CaseIterable {
     case omni = "omni"
 
     public static let userDefaultsKey = "voicepolish.processingMode"
-    public static let appGroupSuiteName = "group.com.voicepolish.shared"
+    public static var appGroupSuiteName: String { SharedContainer.appGroupID }
 
     public var menuTitle: String {
         switch self {

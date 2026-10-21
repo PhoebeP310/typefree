@@ -162,7 +162,7 @@ public enum HistoryCrypto {
 
     private static func defaultSecretStore() -> SecretStoring {
         #if os(iOS)
-        return KeychainSecretStore(accessGroup: "NHC4C4K7X7.com.voicepolish.shared")
+        return KeychainSecretStore(accessGroup: SharedContainer.keychainAccessGroup)
         #else
         // 本地改动：macOS 改用本地文件存储（首次缺失时经 security CLI 从钥匙串迁移），运行时不再碰钥匙串。
         return FileSecretStore.shared

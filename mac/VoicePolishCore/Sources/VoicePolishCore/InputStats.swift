@@ -60,9 +60,7 @@ public final class InputStats {
             self.fileURL = fileURL
         } else {
             #if os(iOS)
-            self.fileURL = FileManager.default
-                .containerURL(forSecurityApplicationGroupIdentifier: "group.com.voicepolish.shared")?
-                .appendingPathComponent("input_stats.json")
+            self.fileURL = SharedContainer.storageURL.appendingPathComponent("input_stats.json")
             #else
             // 跟配置目录走（默认 ~/.config/voicepolish，写不进时 VoicePolishConfig 会退到 Application Support）
             let configDir = VoicePolishConfig.shared.configDirectoryURL

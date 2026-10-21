@@ -1,0 +1,90 @@
+name: TypefreeiOS
+options:
+  bundleIdPrefix: com.phoebep310
+  deploymentTarget:
+    iOS: "16.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "0.1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: ${TYPEFREE_TEAM_ID}
+    TARGETED_DEVICE_FAMILY: "1"
+    TYPEFREE_KEYCHAIN_GROUP: $(AppIdentifierPrefix)com.phoebep310.typefree.shared
+packages:
+  VoicePolishCore:
+    path: ../mac/VoicePolishCore
+targets:
+  Typefree:
+    type: application
+    platform: iOS
+    sources:
+      - App
+      - Shared
+    dependencies:
+      - package: VoicePolishCore
+      - target: TypefreeKeyboard
+        embed: true
+    info:
+      path: App/Info.plist
+      properties:
+        CFBundleDisplayName: Typefree
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        UILaunchScreen: {}
+        UIApplicationSupportsIndirectInputEvents: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait]
+        UIBackgroundModes: [audio]
+        NSMicrophoneUsageDescription: 语音输入需要用麦克风录下你说的话，录音只发给你自己配置的识别服务。
+        TypefreeKeychainGroup: $(TYPEFREE_KEYCHAIN_GROUP)
+        CFBundleURLTypes:
+          - CFBundleURLName: com.phoebep310.typefree
+            CFBundleURLSchemes: [typefree]
+    entitlements:
+      path: App/Typefree.entitlements
+      properties:
+        keychain-access-groups: [$(TYPEFREE_KEYCHAIN_GROUP)]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phoebep310.typefree
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  TypefreeKeyboard:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: Keyboard
+        excludes: ["RimeData/**", "Rime-Bridging.h"]
+      - path: Keyboard/RimeData
+        type: folder
+        buildPhase: resources
+      - Shared
+    dependencies:
+      - package: VoicePolishCore
+      - framework: Vendor/librime-static.xcframework
+        embed: false
+    info:
+      path: Keyboard/Info.plist
+      properties:
+        CFBundleDisplayName: Typefree
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        TypefreeKeychainGroup: $(TYPEFREE_KEYCHAIN_GROUP)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.keyboard-service
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).KeyboardViewController
+          NSExtensionAttributes:
+            IsASCIICapable: false
+            PrefersRightToLeft: false
+            PrimaryLanguage: zh-Hans
+            RequestsOpenAccess: true
+    entitlements:
+      path: Keyboard/TypefreeKeyboard.entitlements
+      properties:
+        keychain-access-groups: [$(TYPEFREE_KEYCHAIN_GROUP)]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.phoebep310.typefree.keyboard
+        SWIFT_OBJC_BRIDGING_HEADER: Keyboard/Rime-Bridging.h
+        OTHER_LDFLAGS: ["-lc++"]

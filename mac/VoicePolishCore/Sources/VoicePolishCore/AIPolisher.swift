@@ -101,6 +101,11 @@ public class AIPolisher {
     public var debugLog: ((String) -> Void)?
     public var polishLogAppNameProvider: (() -> String)?
 
+    /// 本地改动：本次输出风格（iOS 键盘上选的语气 / 优化），每次处理前由 VoicePolishPipeline 设置，空 = 不附加
+    public var sessionStyleRules: [String] = []
+    /// 本地改动：本次整段替换掉「整理助手」基础 prompt（如写大众点评），nil = 用基础 prompt
+    public var sessionSystemPrompt: String?
+
     public init() {}
 
     public struct PolishSelection {
@@ -325,6 +330,14 @@ public class AIPolisher {
     /// 但注入默认关闭——先观察它总结得准不准，确认后把下面的开关置 true 再生效，
     /// 避免总结错了反而把润色带偏。
     private func composedPolishSystemPrompt(outputLanguage: OutputLanguage? = nil, outputFormat: OutputFormat? = nil) -> String {
+        if let override = sessionSystemPrompt, !override.isEmpty {
+            var prompt = override
+            if let outputLanguage { prompt += Self.outputLanguageSystemSection(for: outputLanguage) }
+            prompt += Self.sessionStylePromptSection(sessionStyleRules)
+            prompt += Self.userRulesPromptSection(rawRules: configuredUserRules(), appName: polishLogAppNameProvider?(),
+                                                  outputLanguage: outputLanguage)
+            return prompt
+        }
         var prompt = cloudASRPolishPrompt
         if let outputLanguage { prompt += Self.outputLanguageSystemSection(for: outputLanguage) }
         // 本地改动：格式口令（改成要点 / 结论先行）
@@ -342,7 +355,16 @@ public class AIPolisher {
         // 本地改动：用户在 config.json 的 polish_user_rules 里写的规则（全局 + 按前台 App），放最后
         prompt += Self.userRulesPromptSection(rawRules: configuredUserRules(), appName: polishLogAppNameProvider?(),
                                               outputLanguage: outputLanguage)
+        prompt += Self.sessionStylePromptSection(sessionStyleRules)
         return prompt
+    }
+
+    /// 本地改动：键盘上选的本次风格，放在 prompt 最后（优先级最高）
+    static func sessionStylePromptSection(_ rules: [String]) -> String {
+        let cleaned = rules.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        guard !cleaned.isEmpty else { return "" }
+        return "\n\n## 本次输出风格（用户在键盘上选的，优先遵守；可以为此改写语气和措辞，但不改变原意、不增加原文没有的信息）\n"
+            + cleaned.map { "- " + $0 }.joined(separator: "\n")
     }
 
     /// 本地改动：给测试和离线核对用，拼出与线上请求相同的 system prompt（不读 config 里的词库/画像开关，只拼基础 + 语言 + 格式 + 用户规则）
@@ -604,7 +626,13 @@ public class AIPolisher {
         debugLog?("Cloud ASR polish provider=\(provider.name) model=\(provider.model)")
 
         let systemPrompt = composedPolishSystemPrompt(outputLanguage: outputLanguage, outputFormat: outputFormat)
-        let userPrompt = Self.makeCloudASRPolishUserPrompt(for: text, outputLanguage: outputLanguage, outputFormat: outputFormat)
+        // 本地改动：按语气改写 / 写点评时不走「保留原语言」那句英文提示（会再压一次改写力度）
+        let rewriting = !(sessionSystemPrompt ?? "").isEmpty
+        let userPrompt = rewriting
+            ? "待整理文本：\n<transcript>\n\(text)\n</transcript>"
+            : Self.makeCloudASRPolishUserPrompt(for: text, outputLanguage: outputLanguage, outputFormat: outputFormat)
+        // 改写要有变化：0.1 几乎不改，0.7 偶尔夸大，实测 0.5 最稳（千问通道本来就是 0.7，不动）
+        let rewriteTemperature = 0.5
 
         func makeBody(_ model: String) -> [String: Any] {
             var body: [String: Any] = [
@@ -620,14 +648,14 @@ public class AIPolisher {
                 body["result_format"] = "message"
                 body["enable_thinking"] = false
             } else if provider.name == "zhipu" {
-                body["temperature"] = 0.1
+                body["temperature"] = rewriting ? rewriteTemperature : 0.1
                 body["max_tokens"] = 2000
                 body["thinking"] = ["type": "disabled"]
             } else if provider.name == "deepseek" {
-                body["temperature"] = 0.1
+                body["temperature"] = rewriting ? rewriteTemperature : 0.1
                 body["max_tokens"] = 2000
             } else {  // doubao
-                body["temperature"] = 0.1
+                body["temperature"] = rewriting ? rewriteTemperature : 0.1
                 body["max_tokens"] = 2000
                 body["thinking"] = ["type": "disabled"]  // 关闭深度思考：润色不需要，且更快
             }
@@ -1049,9 +1077,7 @@ public class AIPolisher {
     }
 
     private static func pendingLogFileURL() -> URL? {
-        FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: "group.com.voicepolish.shared")?
-            .appendingPathComponent("polish_log_pending.jsonl")
+        SharedContainer.storageURL.appendingPathComponent("polish_log_pending.jsonl")
     }
 
     private func appendToPendingLog(_ entry: PolishLog) -> Bool {

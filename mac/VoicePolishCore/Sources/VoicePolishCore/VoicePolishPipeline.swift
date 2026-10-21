@@ -24,6 +24,24 @@ public final class VoicePolishPipeline {
     /// 本次按某种目标语言输出时触发（在 .done 之前）。command 非 nil = 语音口令触发；nil = 默认输出语言。
     public var onOutputLanguageApplied: ((_ language: OutputLanguage, _ command: OutputLanguageCommand?) -> Void)?
 
+    /// 本地改动：本次输出风格（iOS 键盘上的语气 / 优化 / 翻译）。每次 process 前由调用方设置，nil = 没有。
+    public struct SessionStyle: Equatable {
+        public var rules: [String]
+        public var outputLanguage: OutputLanguage?
+        /// 整段替换基础 prompt（如写大众点评）
+        public var systemPrompt: String?
+
+        public init(rules: [String] = [], outputLanguage: OutputLanguage? = nil, systemPrompt: String? = nil) {
+            self.rules = rules
+            self.outputLanguage = outputLanguage
+            self.systemPrompt = systemPrompt
+        }
+
+        public var isEmpty: Bool { rules.isEmpty && outputLanguage == nil && systemPrompt == nil }
+    }
+
+    public var sessionStyle: SessionStyle?
+
     /// 可注入的音频保存器：把样本存档并返回音频文件名（如 "<id>.m4a"），失败/不保存返回 nil。
     /// macOS 设置它以保留历史音频；iOS 留 nil（不保留）。是否真正保存由调用方（含"保留音频"开关）决定。
     public var audioSaver: ((_ samples: [Float], _ id: String) -> String?)?
@@ -304,6 +322,32 @@ public final class VoicePolishPipeline {
         }
     }
 
+    /// 本地改动：按键盘选的风格润色（可带格式口令）；润色关着就原样输出
+    private func applyStyledPolish(format: OutputFormat?, text: String, rawASR: String,
+                                   pipelineStart: Date, samples: [Float], entryID: String) {
+        log("Session style polish: rules=\(aiPolisher.sessionStyleRules.count) format=\(format?.rawValue ?? "-")")
+        guard aiPolisher.isPolishEnabled() else {
+            finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            return
+        }
+        emit(.polishing(message: "整理中..."), entryID)
+        aiPolisher.polishCloudASROutput(text: text, outputFormat: format) { [weak self] result in
+            guard let self = self else { return }
+            switch result {
+            case .success(let polished) where !polished.isEmpty:
+                self.finishProcessing(with: polished, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            case .success:
+                self.finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            case .failure(let err):
+                self.log("Session style polish failed: \(err), fallback to original")
+                if case AIPolisher.PolishError.noAPIKey = err {} else if self.isActive(entryID) {
+                    self.onPolishFailed?((err as? LocalizedError)?.errorDescription ?? "\(err)")
+                }
+                self.finishProcessing(with: text, rawASR: rawASR, pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            }
+        }
+    }
+
     /// 决定本次是否要按目标语言输出：语音口令优先，其次是「默认输出语言」；返回目标语言与去掉口令后的正文。
     static func resolveOutputLanguage(rawText: String, command: OutputLanguageCommand?, defaultLanguage: OutputLanguage?) -> (target: OutputLanguage, text: String)? {
         guard let target = command?.target ?? defaultLanguage else { return nil }
@@ -355,6 +399,21 @@ public final class VoicePolishPipeline {
         // 本地改动：语言口令和格式口令（改成要点 / 结论先行）一起识别；正文用两者都剥掉后的文本
         let commands = Self.detectVoiceCommands(in: rawText)
         let command = commands.language
+        // 本地改动：键盘选了风格（语气 / 优化 / 翻译）时，不管多短都过一遍模型；语音口令仍然优先
+        let style = sessionStyle ?? SessionStyle()
+        aiPolisher.sessionStyleRules = style.rules
+        aiPolisher.sessionSystemPrompt = style.systemPrompt
+        if !style.isEmpty {
+            let target = command?.target ?? style.outputLanguage ?? OutputLanguage.defaultLanguage()
+            if let target {
+                applyOutputLanguage(target, command: command, format: commands.format?.format, text: commands.strippedText, rawASR: rawText,
+                                    pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            } else {
+                applyStyledPolish(format: commands.format?.format, text: commands.strippedText, rawASR: rawText,
+                                  pipelineStart: pipelineStart, samples: samples, entryID: entryID)
+            }
+            return
+        }
         if let plan = Self.resolveOutputLanguage(rawText: rawText, command: command, defaultLanguage: OutputLanguage.defaultLanguage()) {
             applyOutputLanguage(plan.target, command: command, format: commands.format?.format, text: commands.strippedText, rawASR: rawText,
                                 pipelineStart: pipelineStart, samples: samples, entryID: entryID)

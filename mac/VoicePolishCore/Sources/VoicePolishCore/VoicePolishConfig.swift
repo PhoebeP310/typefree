@@ -42,12 +42,9 @@ public final class VoicePolishConfig {
     /// 默认初始化：macOS 使用 ~/.config/voicepolish/
     private convenience init() {
         #if os(iOS)
-        // iOS：使用 App Group 共享容器；钥匙串用共享 access group，让主 App 与键盘扩展互通
-        let containerURL = FileManager.default
-            .containerURL(forSecurityApplicationGroupIdentifier: "group.com.voicepolish.shared")
-            ?? FileManager.default.temporaryDirectory
-        self.init(configDir: containerURL,
-                  secrets: KeychainSecretStore(accessGroup: "NHC4C4K7X7.com.voicepolish.shared"))
+        // iOS：有 App Group 用 App Group 容器，否则用本 App 的 Application Support（见 SharedContainer.storageURL）
+        self.init(configDir: SharedContainer.storageURL,
+                  secrets: KeychainSecretStore(accessGroup: SharedContainer.keychainAccessGroup))
         #else
         // macOS：使用用户主目录（钥匙串不设 access group）；建不了/写不进就退到 Application Support
         let home = FileManager.default.homeDirectoryForCurrentUser

@@ -27,7 +27,7 @@ public final class AppGroupBridge {
     public static let shared = AppGroupBridge()
     private static let legacySessionID = "legacy"
 
-    private let appGroupID = "group.com.voicepolish.shared"
+    private let appGroupID = SharedContainer.appGroupID
     private let commandFileName = "recording_command.json"
     private let snapshotFileName = "recording_snapshot.json"
     private let containerURL: URL?
