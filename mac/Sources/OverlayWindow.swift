@@ -154,7 +154,9 @@ class OverlayWindow {
             hideLearnedWindow()
         }
         // 样式/操作按钮设置变了 → 丢弃旧浮窗，下次按新设置重建。
-        if let cv = capsuleView, cv.style != OverlayStyle.current || cv.controlsMode != OverlayControlsMode.current {
+        // 本地改动：主题色变了（墨黑样式声波跟随主题色）也重建
+        if let cv = capsuleView, cv.style != OverlayStyle.current || cv.controlsMode != OverlayControlsMode.current
+            || cv.monoWave != (ColorTheme.current.overlayWave ?? .white) {
             hide()
             window = nil
             capsuleView = nil
@@ -650,6 +652,8 @@ class SiriCapsuleView: NSView {
 
     let style: OverlayStyle
     let controlsMode: OverlayControlsMode
+    /// 本地改动：墨黑样式的声波色，选了主题色时跟随主题（建胶囊时定下，主题变了由 OverlayWindow 重建）
+    let monoWave: NSColor = ColorTheme.current.overlayWave ?? .white
     var onCancelRecording: (() -> Void)?
     var onFinishRecording: (() -> Void)?
     var onLockedDragStart: ((NSPoint) -> Bool)?
@@ -743,7 +747,7 @@ class SiriCapsuleView: NSView {
         let pillBottom = cy - pillH / 2
         progressFillLayer = CALayer()
         progressFillLayer.backgroundColor = (style == .mono
-            ? NSColor(white: 1, alpha: 0.22)
+            ? monoWave.withAlphaComponent(0.22)
             : NSColor(red: 0.50, green: 0.35, blue: 0.95, alpha: 0.55)).cgColor
         progressFillLayer.frame = CGRect(x: pillLeft, y: pillBottom, width: 0, height: pillH)
         progressFillLayer.cornerRadius = pillH / 2
@@ -791,7 +795,7 @@ class SiriCapsuleView: NSView {
             } else {
                 color = lerpColor(barColorMid, barColorRight, t: (t - 0.5) * 2)
             }
-            bar.backgroundColor = (style == .mono ? NSColor.white : color).cgColor
+            bar.backgroundColor = (style == .mono ? monoWave : color).cgColor
 
             barClipLayer.addSublayer(bar)
             barLayers.append(bar)
@@ -985,7 +989,7 @@ class SiriCapsuleView: NSView {
         thinkTextLayer.isHidden = true
         progressFillLayer.isHidden = false
         progressFillLayer.backgroundColor = (style == .mono
-            ? NSColor.white.withAlphaComponent(0.16)
+            ? monoWave.withAlphaComponent(0.16)
             : thinkColors.first!.withAlphaComponent(0.28)).cgColor
 
         let pillLeft = bounds.midX - pillW / 2

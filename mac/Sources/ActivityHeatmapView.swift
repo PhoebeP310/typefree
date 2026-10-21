@@ -10,7 +10,7 @@ import VoicePolishCore
 /// 深浅按窗口内单日最多字数分 4 档（ActivityRhythm.intensityLevel），颜色沿用原节律圆点那个蓝。
 /// 系统 tooltip 在这里不可靠，悬停信息自己画。
 final class ActivityHeatmapView: NSView {
-    /// 与原节律圆点同一个蓝（刻意的，不跟随主题强调色）
+    /// 与原节律圆点同一个蓝（默认主题下热力图用 VPTheme.heat，值同此色）
     static let accent = NSColor(red: 0.25, green: 0.52, blue: 1.0, alpha: 1)
     static let maxWeeks = 53   // 本地改动：26 → 53，配合铺满宽度
     private static let levelAlphas: [CGFloat] = [0, 0.25, 0.5, 0.75, 1.0]
@@ -145,7 +145,7 @@ final class ActivityHeatmapView: NSView {
     private var emptyFill: NSColor { theme.text3.withAlphaComponent(0.12) }
 
     private func fill(level: Int) -> NSColor {
-        level == 0 ? emptyFill : Self.accent.withAlphaComponent(Self.levelAlphas[level])
+        level == 0 ? emptyFill : theme.heat.withAlphaComponent(Self.levelAlphas[level])
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -177,7 +177,7 @@ final class ActivityHeatmapView: NSView {
                 let hovered = hover?.col == col && hover?.row == row
                 if day.isToday || hovered {
                     let ring = NSBezierPath(roundedRect: rect.insetBy(dx: -1.5, dy: -1.5), xRadius: radius + 1, yRadius: radius + 1)
-                    (hovered ? theme.text : Self.accent).setStroke()
+                    (hovered ? theme.text : theme.heat).setStroke()
                     ring.lineWidth = 1.5
                     ring.stroke()
                 }

@@ -708,7 +708,7 @@ private final class OverlayStylePreview: NSView {
 
     /// 波形条颜色：彩色＝粉→紫→蓝插值（同 SiriCapsuleView.barColorLeft/Mid/Right）；墨黑＝白。
     private func barColor(_ t: CGFloat) -> NSColor {
-        if mono { return NSColor(white: 1, alpha: 0.92) }
+        if mono { return ColorTheme.current.overlayWave ?? NSColor(white: 1, alpha: 0.92) }   // 本地改动：跟随主题色
         let pink = NSColor(red: 1.0, green: 0.25, blue: 0.50, alpha: 1)
         let purple = NSColor(red: 0.75, green: 0.20, blue: 0.90, alpha: 1)
         let blue = NSColor(red: 0.30, green: 0.35, blue: 1.00, alpha: 1)
@@ -3999,6 +3999,10 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
         let appearanceCard = makeAppearanceCard()
         stack.addArrangedSubview(appearanceCard)
         stack.setCustomSpacing(10, after: appearanceCard)
+        // 本地改动：主题色
+        let colorThemeCard = makeColorThemeCard()
+        stack.addArrangedSubview(colorThemeCard)
+        stack.setCustomSpacing(10, after: colorThemeCard)
         let dockCard = makeDockIconCard()
         stack.addArrangedSubview(dockCard)
         stack.setCustomSpacing(24, after: dockCard)
@@ -4037,7 +4041,7 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         let styleLabel = label("颜色样式", size: 12.5, weight: .semibold, color: theme.text2)
         let colorTile = OverlayStyleTile(mono: false, title: "彩色（Siri）", theme: theme)
-        let monoTile = OverlayStyleTile(mono: true, title: "墨黑 · 白波", theme: theme)
+        let monoTile = OverlayStyleTile(mono: true, title: ColorTheme.current == .mono ? "墨黑 · 白波" : "墨黑 · \(ColorTheme.current.title)", theme: theme)
         let isMono = OverlayStyle.current == .mono
         colorTile.setSelected(!isMono)
         monoTile.setSelected(isMono)
@@ -4154,6 +4158,64 @@ final class SettingsWindowController: NSWindowController, NSWindowDelegate, NSTe
 
         mount(row, in: card)
         return card
+    }
+
+    /// 本地改动：主题色。与深色模式正交，浅色/深色各有一套染色。
+    private func makeColorThemeCard() -> NSView {
+        let card = makeCard()
+
+        let title = label("主题色", size: 14, weight: .medium, color: theme.text)
+        let desc = label("给主窗口换一种颜色：侧栏选中、按钮、热力图都会跟着变。",
+                         size: 12, weight: .regular, color: theme.text3)
+        desc.maximumNumberOfLines = 0
+
+        let seg = VPSegmentedControl(
+            labels: ColorTheme.allCases.map(\.title),
+            trackBg: theme.cardAlt,
+            trackBorder: theme.sep,
+            selBg: theme.segSelBg,
+            selBorder: theme.sep,
+            selText: theme.text,
+            normalText: theme.text2,
+            target: self,
+            action: #selector(colorThemeChanged(_:)))
+        seg.selectedSegment = ColorTheme.allCases.firstIndex(of: ColorTheme.current) ?? 0
+        seg.widthAnchor.constraint(equalToConstant: 340).isActive = true
+        seg.setContentHuggingPriority(.required, for: .horizontal)
+        seg.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        let textStack = NSStackView()
+        textStack.orientation = .vertical
+        textStack.alignment = .leading
+        textStack.spacing = 2
+        textStack.addArrangedSubview(title)
+        textStack.addArrangedSubview(desc)
+        textStack.setHuggingPriority(.defaultLow, for: .horizontal)
+
+        let row = NSStackView()
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.distribution = .fill
+        row.spacing = 16
+        row.edgeInsets = NSEdgeInsets(top: 16, left: 20, bottom: 16, right: 20)
+        row.addArrangedSubview(textStack)
+        row.addArrangedSubview(seg)
+
+        mount(row, in: card)
+        return card
+    }
+
+    @objc private func colorThemeChanged(_ sender: VPSegmentedControl) {
+        let option = ColorTheme.allCases[sender.selectedSegment]
+        guard option != ColorTheme.current else { return }
+        UserDefaults.standard.set(option.rawValue, forKey: ColorTheme.userDefaultsKey)
+        // 动态色已按新主题解析；CGColor 快照和分段控件这类构造时取色的，重建一遍最稳
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.rebuildSidebar()
+            self.reload()
+            self.applyTheme()
+        }
     }
 
     /// 录音提示音开关（工单 #1003）。布局照抄 Dock 开关卡片。

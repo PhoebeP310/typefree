@@ -7,24 +7,25 @@ import ObjectiveC
 /// App 其余部分仍锁浅色（AppDelegate 里 NSApp.appearance = .aqua）。
 /// 2026-09-11：Codex 曾把这里换成「曜石银白」，Ray 不认可，已恢复原值。
 struct VPTheme {
-    let bg: NSColor
-    let card: NSColor
-    let cardAlt: NSColor
-    let answerBackground: NSColor
-    let text: NSColor
-    let text2: NSColor
-    let text3: NSColor
-    let sep: NSColor
-    let accent: NSColor
-    let accentSoft: NSColor
-    let onAccent: NSColor       // 强调色实心底上的文字色（深底→白、浅底→深），与 accent 解耦
-    let segSelBg: NSColor       // 分段控件选中药丸底色（系统风：浅灰轨道上浮起的白药丸）
-    let danger: NSColor
-    let ok: NSColor
-    let sidebarBg: NSColor
-    let sidebarSel: NSColor
-    let sidebarHover: NSColor   // 侧栏悬停：原来就是白色 25% 透明
-    let link: NSColor
+    var bg: NSColor
+    var card: NSColor
+    var cardAlt: NSColor
+    var answerBackground: NSColor
+    var text: NSColor
+    var text2: NSColor
+    var text3: NSColor
+    var sep: NSColor
+    var accent: NSColor
+    var accentSoft: NSColor
+    var onAccent: NSColor       // 强调色实心底上的文字色（深底→白、浅底→深），与 accent 解耦
+    var segSelBg: NSColor       // 分段控件选中药丸底色（系统风：浅灰轨道上浮起的白药丸）
+    var danger: NSColor
+    var ok: NSColor
+    var sidebarBg: NSColor
+    var sidebarSel: NSColor
+    var sidebarHover: NSColor   // 侧栏悬停：原来就是白色 25% 透明
+    var link: NSColor
+    var heat: NSColor           // 本地改动：首页热力图格子色（默认主题保持原来那个蓝）
 
     /// 与原来 SettingsWindowController 里的 NSColor(hex:) 完全同一种写法，颜色值一模一样
     private static func hex(_ v: UInt32) -> NSColor {
@@ -52,7 +53,8 @@ struct VPTheme {
         sidebarBg: hex(0xFFFFFF),
         sidebarSel: hex(0xF2F2F3),
         sidebarHover: NSColor.white.withAlphaComponent(0.25),
-        link: NSColor.linkColor
+        link: NSColor.linkColor,
+        heat: NSColor(red: 0.25, green: 0.52, blue: 1.0, alpha: 1)
     )
 
     /// 夜间配色「原生深灰」（2026-09-11，样板 mockups/dark-mode-options.html）：底色同 macOS 自带窗口 #1E1E1E，
@@ -75,7 +77,8 @@ struct VPTheme {
         sidebarBg: hex(0x1E1E1E),
         sidebarSel: NSColor(red: 1, green: 1, blue: 1, alpha: 0.08),
         sidebarHover: hex(0x1E1E1E).withAlphaComponent(0.25),   // 同浅色：悬停不显色
-        link: NSColor.linkColor
+        link: NSColor.linkColor,
+        heat: NSColor(red: 0.25, green: 0.52, blue: 1.0, alpha: 1)
     )
 
     /// AppKit 控件持有动态 NSColor，不因系统切换而重建页面、丢失输入或焦点。
@@ -86,7 +89,8 @@ struct VPTheme {
         sep: adaptive(\.sep), accent: adaptive(\.accent), accentSoft: adaptive(\.accentSoft),
         onAccent: adaptive(\.onAccent), segSelBg: adaptive(\.segSelBg),
         danger: adaptive(\.danger), ok: adaptive(\.ok), sidebarBg: adaptive(\.sidebarBg),
-        sidebarSel: adaptive(\.sidebarSel), sidebarHover: adaptive(\.sidebarHover), link: adaptive(\.link)
+        sidebarSel: adaptive(\.sidebarSel), sidebarHover: adaptive(\.sidebarHover), link: adaptive(\.link),
+        heat: adaptive(\.heat)
     )
 
     static func isDark(_ appearance: NSAppearance) -> Bool {
@@ -97,10 +101,89 @@ struct VPTheme {
         NSColor(name: nil) { isDark($0) ? dark : light }
     }
 
+    /// 本地改动：动态色解析时再读当前主题色，切主题只需刷新颜色，不用换掉控件手里的 NSColor
     private static func adaptive(_ keyPath: KeyPath<VPTheme, NSColor>) -> NSColor {
-        adaptive(light: light[keyPath: keyPath], dark: dark[keyPath: keyPath])
+        NSColor(name: nil) { ColorTheme.current.palette(dark: isDark($0))[keyPath: keyPath] }
     }
 
+    /// 只给小面积点缀染色：强调色、侧栏选中、热力图；底色/卡片/标签底保持原来的中性白灰（大面积染色发腻）
+    fileprivate func tinted(_ t: ColorTheme.Tint) -> VPTheme {
+        var v = self
+        v.accent = Self.hex(t.accent)
+        v.sidebarSel = Self.hex(t.soft)
+        v.heat = Self.hex(t.heat)
+        return v
+    }
+
+}
+
+/// 本地改动：主题色（设置 → 外观 → 主题色），与深浅模式正交。存在 UserDefaults.standard。
+/// 只影响主窗口；录音胶囊、引导窗等仍是原来的黑白。
+enum ColorTheme: String, CaseIterable {
+    case mono, pink, mint, blue, lavender
+
+    static let userDefaultsKey = "ColorTheme"
+
+    static var current: ColorTheme {
+        ColorTheme(rawValue: UserDefaults.standard.string(forKey: userDefaultsKey) ?? "") ?? .mono
+    }
+
+    var title: String {
+        switch self {
+        case .mono: return "默认"
+        case .pink: return "樱花粉"
+        case .mint: return "薄荷"
+        case .blue: return "雾蓝"
+        case .lavender: return "薰衣草"
+        }
+    }
+
+    struct Tint {
+        let accent: UInt32, soft: UInt32, heat: UInt32
+    }
+
+    /// 浅色强调色都保证白字对比 ≥ 4.5:1；深色强调色是亮色，onAccent 沿用深色主题的深字
+    private var tints: (light: Tint, dark: Tint)? {
+        switch self {
+        case .mono: return nil
+        case .pink: return (
+            Tint(accent: 0xD13A72, soft: 0xFCE4EE, heat: 0xEC4D8A),
+            Tint(accent: 0xF58BB1, soft: 0x3D2832, heat: 0xF27AA6))
+        case .mint: return (
+            Tint(accent: 0x1A7F62, soft: 0xDDF1E9, heat: 0x2BB38A),
+            Tint(accent: 0x6CD8B0, soft: 0x22362F, heat: 0x4CC79A))
+        case .blue: return (
+            Tint(accent: 0x2B63D1, soft: 0xE2EBFC, heat: 0x4085FF),
+            Tint(accent: 0x86AEFF, soft: 0x243049, heat: 0x5B93FF))
+        case .lavender: return (
+            Tint(accent: 0x7350D0, soft: 0xECE5FB, heat: 0x9271E8),
+            Tint(accent: 0xB7A2F7, soft: 0x302943, heat: 0xA48BF0))
+        }
+    }
+
+    private static let cache: [String: VPTheme] = {
+        var c: [String: VPTheme] = [:]
+        for t in ColorTheme.allCases {
+            c[t.rawValue + "-l"] = t.tints.map { VPTheme.light.tinted($0.light) } ?? .light
+            c[t.rawValue + "-d"] = t.tints.map { VPTheme.dark.tinted($0.dark) } ?? .dark
+        }
+        return c
+    }()
+
+    /// 录音浮窗「墨黑」样式的声波色：黑底上用深色版强调色（亮一档）；默认主题 nil = 白波
+    var overlayWave: NSColor? {
+        guard let t = tints?.dark else { return nil }
+        return NSColor(srgbRed: CGFloat((t.accent >> 16) & 0xFF) / 255,
+                       green: CGFloat((t.accent >> 8) & 0xFF) / 255,
+                       blue: CGFloat(t.accent & 0xFF) / 255, alpha: 1)
+    }
+
+    func palette(dark: Bool) -> VPTheme {
+        Self.cache[rawValue + (dark ? "-d" : "-l")]!
+    }
+
+    /// 主题色变了：主窗口重建侧栏和页面
+    static let didChangeNotification = Notification.Name("TypefreeColorThemeDidChange")
 }
 
 /// 主窗口（设置窗）和问 AI 面板的外观：跟随系统 / 浅色 / 深色，存在 UserDefaults.standard。
