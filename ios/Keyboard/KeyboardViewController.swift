@@ -15,6 +15,9 @@ final class KeyboardViewController: UIInputViewController {
     private enum Mode: Int, CaseIterable {
         case voice, pinyin, english, kaomoji, reply
 
+        /// 顶栏和左右滑只走这几页：英文直接在双拼里敲、回车上屏，英文页只从双拼的「英」键进
+        static let tabs: [Mode] = [.voice, .pinyin, .kaomoji, .reply]
+
         var title: String {
             switch self {
             case .voice: return "语音"
@@ -28,8 +31,8 @@ final class KeyboardViewController: UIInputViewController {
         /// 字母键盘页矮一点，按键和系统键盘一样高；其余页内容多，高一些
         var height: CGFloat {
             switch self {
-            case .pinyin, .english: return 272
-            default: return 330
+            case .pinyin, .english, .voice: return 280
+            default: return 338
             }
         }
     }
@@ -37,7 +40,6 @@ final class KeyboardViewController: UIInputViewController {
     private static let modeKey = "keyboard_mode"
     private static let styleKey = "keyboard_style"
     private static let toneUsageKey = "keyboard_tone_last_used"
-    private static let replyTonesKey = "keyboard_reply_tones"
     private static let purposeKey = "keyboard_pending_purpose"
 
     /// 这次录音是要上屏的口述，还是回复页「说想法」
@@ -70,6 +72,7 @@ final class KeyboardViewController: UIInputViewController {
     private var replyPanel: ReplyPanel!
     private var heightConstraint: NSLayoutConstraint!
     private let logoLabel = UILabel()
+    private var clipboardCache: (change: Int, text: String?) = (-1, nil)
     private var logoText = NSAttributedString()
 
     // 回复页
@@ -91,6 +94,7 @@ final class KeyboardViewController: UIInputViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+        ToneCustomization.reload()   // App 设置里改的 emoji / 名字 / 隐藏
         mode = Mode(rawValue: TypefreeShared.defaults.integer(forKey: Self.modeKey)) ?? .voice
         if let data = TypefreeShared.defaults.data(forKey: Self.styleKey),
            let saved = try? JSONDecoder().decode(StyleSelection.self, from: data) {
@@ -107,6 +111,7 @@ final class KeyboardViewController: UIInputViewController {
             self?.syncFromSnapshot()
         }
         refreshReturnTitles()
+        if hasFullAccess { bridge.markKeyboardSeen() }   // 让 App 首页的「允许完全访问」这一步打勾
         if mode == .reply { loadClipboardForReply() }
         syncFromSnapshot()
     }
@@ -147,7 +152,12 @@ final class KeyboardViewController: UIInputViewController {
                 button.isHidden = true
                 self.globeButtons.append(button)
             },
-            returnTitle: { [weak self] in self?.returnTitle ?? "换行" }
+            returnTitle: { [weak self] in self?.returnTitle ?? "换行" },
+            moveCursor: { [weak self] in self?.textDocumentProxy.adjustTextPosition(byCharacterOffset: $0) },
+            setMarked: { [weak self] text in
+                self?.textDocumentProxy.setMarkedText(text, selectedRange: NSRange(location: (text as NSString).length, length: 0))
+            },
+            unmark: { [weak self] in self?.textDocumentProxy.unmarkText() }
         )
     }
 
@@ -186,7 +196,7 @@ final class KeyboardViewController: UIInputViewController {
         segment.layer.cornerRadius = 10
         segment.isLayoutMarginsRelativeArrangement = true
         segment.layoutMargins = UIEdgeInsets(top: 2, left: 2, bottom: 2, right: 2)
-        for m in Mode.allCases {
+        for m in Mode.tabs {
             let b = UIButton(type: .custom)
             b.setTitle(m.title, for: .normal)
             b.tag = m.rawValue
@@ -202,9 +212,12 @@ final class KeyboardViewController: UIInputViewController {
         header.spacing = 8
         segment.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-        voicePanel = VoicePanel(style: style, toneOrder: orderedTones(), actions: actions)
+        voicePanel = VoicePanel(style: style, actions: actions)
+        style = voicePanel.style   // 老数据里的简洁 / 扩充已挪到篇幅
         voicePanel.onMicTap = { [weak self] in self?.micTapped() }
-        voicePanel.onStyleChange = { [weak self] in self?.styleChanged($0) }
+        voicePanel.onMicHoldBegan = { [weak self] in self?.micHoldBegan() ?? false }
+        voicePanel.onMicHoldEnded = { [weak self] in self?.micHoldEnded($0) }
+        voicePanel.onStyleChange = { [weak self] in self?.styleChanged($0, from: .voice) }
         pinyinPanel = PinyinPanel(actions: actions)
         pinyinPanel.onSwitchToEnglish = { [weak self] in self?.showMode(.english, animated: true) }
         pinyinPanel.onComposingChange = { [weak self] composing in
@@ -213,11 +226,8 @@ final class KeyboardViewController: UIInputViewController {
         }
         englishPanel = LetterPanel(actions: actions)
         kaomojiPanel = KaomojiPanel(actions: actions)
-        let savedReplyTones = (TypefreeShared.defaults.stringArray(forKey: Self.replyTonesKey) ?? []).compactMap(Tone.init(rawValue:))
-        replyPanel = ReplyPanel(tones: savedReplyTones, toneOrder: orderedTones(), actions: actions)
-        replyPanel.onTonesChange = { tones in
-            TypefreeShared.defaults.set(tones.map(\.rawValue), forKey: Self.replyTonesKey)
-        }
+        replyPanel = ReplyPanel(style: style, actions: actions)
+        replyPanel.onStyleChange = { [weak self] in self?.styleChanged($0, from: .reply) }
         replyPanel.onGenerate = { [weak self] in self?.generateReplies() }
         replyPanel.onIntentMic = { [weak self] in self?.replyIntentTapped() }
         replyPanel.onClearIntent = { [weak self] in
@@ -260,13 +270,13 @@ final class KeyboardViewController: UIInputViewController {
         ])
         let root = UIStackView(arrangedSubviews: [headerArea, content])
         root.axis = .vertical
-        root.spacing = 6
+        root.spacing = 10
         root.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(root)
         NSLayoutConstraint.activate([
             root.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 8),
             root.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -8),
-            root.topAnchor.constraint(equalTo: view.topAnchor, constant: 8),
+            root.topAnchor.constraint(equalTo: view.topAnchor, constant: 12),
             root.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -6),
             headerArea.heightAnchor.constraint(equalToConstant: 36),
             segment.heightAnchor.constraint(equalToConstant: 34),
@@ -279,6 +289,7 @@ final class KeyboardViewController: UIInputViewController {
         left.direction = .left
         [right, left].forEach {
             $0.cancelsTouchesInView = false
+            $0.delegate = self
             view.addGestureRecognizer($0)
         }
     }
@@ -296,7 +307,8 @@ final class KeyboardViewController: UIInputViewController {
         if newMode == .reply { loadClipboardForReply() }
         refreshLogo()
         for b in segmentButtons {
-            let on = b.tag == newMode.rawValue
+            // 英文页从双拼进，顶栏仍亮「拼」
+            let on = b.tag == (newMode == .english ? Mode.pinyin : newMode).rawValue
             b.backgroundColor = on ? KTheme.raised : .clear
             b.setTitleColor(on ? KTheme.text : KTheme.secondary, for: .normal)
             b.titleLabel?.font = .systemFont(ofSize: 14, weight: on ? .semibold : .regular)
@@ -323,8 +335,8 @@ final class KeyboardViewController: UIInputViewController {
 
     @objc private func swiped(_ g: UISwipeGestureRecognizer) {
         guard state != .recording else { return }
-        let all = Mode.allCases
-        let i = mode.rawValue
+        let all = Mode.tabs
+        let i = all.firstIndex(of: mode == .english ? .pinyin : mode) ?? 0
         let next = g.direction == .right ? min(i + 1, all.count - 1) : max(i - 1, 0)
         guard next != i else { return }
         haptic.impactOccurred()
@@ -336,7 +348,7 @@ final class KeyboardViewController: UIInputViewController {
     /// 最近用过的语气排前面（按最近一次使用），没用过的保持默认顺序。只在键盘打开时排，用的时候不跳。
     private func orderedTones() -> [Tone] {
         let used = TypefreeShared.defaults.dictionary(forKey: Self.toneUsageKey) as? [String: Double] ?? [:]
-        let defaultOrder = Tone.allCases
+        let defaultOrder = Tone.allCases.filter { !$0.isHidden }
         return defaultOrder.sorted { a, b in
             let ta = used[a.rawValue], tb = used[b.rawValue]
             switch (ta, tb) {
@@ -348,8 +360,11 @@ final class KeyboardViewController: UIInputViewController {
         }
     }
 
-    private func styleChanged(_ newStyle: StyleSelection) {
+    /// 语音页和回复页用同一份风格：一边改了另一边跟着变
+    private func styleChanged(_ newStyle: StyleSelection, from page: Mode) {
         style = newStyle
+        if page != .voice { voicePanel.setStyle(newStyle) }
+        if page != .reply { replyPanel?.setStyle(newStyle) }
         if let data = try? JSONEncoder().encode(newStyle) {
             TypefreeShared.defaults.set(data, forKey: Self.styleKey)
         }
@@ -375,30 +390,20 @@ final class KeyboardViewController: UIInputViewController {
             default: break
             }
         }
-        let summary = style.summary
-        let suffix = summary.isEmpty ? "" : " · \(summary)"
+        // 界面上看得见的状态（选了什么、在听、在整理）不再用文字重复，只留权限和出错
         switch state {
         case .idle:
             voicePanel.setMic(.idle)
-            if !hasFullAccess {
-                voicePanel.setStatus("请在 设置 → 通用 → 键盘 → Typefree 里打开「允许完全访问」")
-            } else if TypefreeShared.isStandbyAlive(bridge.readStandbyStatus()) {
-                voicePanel.setStatus("点击说话" + suffix)
-            } else {
-                voicePanel.setStatus("点击说话" + suffix + "（会先跳到 Typefree）")
-            }
-        case .waitingForApp:
+            voicePanel.setMessage(hasFullAccess ? nil : "请在 设置 → 通用 → 键盘 → Typefree 里打开「允许完全访问」")
+        case .waitingForApp, .recording:
             voicePanel.setMic(.recording)
-            voicePanel.setStatus("已开始听，点左上角「◀︎」回到这里说话", emphasized: true)
-        case .recording:
-            voicePanel.setMic(.recording)
-            voicePanel.setStatus("正在听…" + suffix, emphasized: true)
+            voicePanel.setMessage(nil)
         case .processing:
             voicePanel.setMic(.processing)
-            voicePanel.setStatus("整理中…" + suffix)
+            voicePanel.setMessage(nil)
         case .message(let message):
             voicePanel.setMic(.idle)
-            voicePanel.setStatus(message, emphasized: true)
+            voicePanel.setMessage(message)
         }
         state == .recording ? startLevelLink() : stopLevelLink()
     }
@@ -432,6 +437,43 @@ final class KeyboardViewController: UIInputViewController {
             bridge.writeStyle(style)
             recordToneUsage()
             startRecording()
+        }
+    }
+
+    /// 长按麦克风：开始听并弹出翻译目标。录音中按久了也当「说完了」
+    private func micHoldBegan() -> Bool {
+        switch state {
+        case .recording:
+            micTapped()
+            return false
+        case .processing:
+            return false
+        default:
+            micTapped()
+            return state == .recording   // 要跳主 App 时不弹目标
+        }
+    }
+
+    /// 长按松手：落在英文 / 粤语上 = 这一句翻译；拖到麦克风下方 = 取消（结果丢掉、不进历史）
+    private func micHoldEnded(_ end: VoicePanel.HoldEnd) {
+        guard state == .recording, let sessionID = pendingSessionID else { return }
+        haptic.impactOccurred()
+        switch end {
+        case .plain:
+            break
+        case .translate(let target):
+            var once = style
+            once.translate = target
+            bridge.writeStyle(once)   // 主 App 在停止录音时才读风格
+        case .cancel:
+            bridge.writeStyle(StyleSelection(transient: true))
+        }
+        sendCommand(.stop(sessionID: sessionID))
+        if end == .cancel {
+            pendingSessionID = nil
+            state = .idle
+        } else {
+            state = .processing
         }
     }
 
@@ -543,7 +585,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         if board.changeCount != lastClipboardChange {
             lastClipboardChange = board.changeCount
-            let text = board.hasStrings ? board.string?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+            let text = currentClipboard()
             // 自己刚从键盘打出去的字不算对方的消息
             let fresh = (text?.isEmpty == false && text != lastInsertedText) ? text : nil
             if fresh != replyMessage {
@@ -556,6 +598,16 @@ final class KeyboardViewController: UIInputViewController {
             replyPanel.setPhase(.empty)
         }
         refreshLogo()
+    }
+
+    /// 剪贴板只在变过时读一次，免得反复弹「允许粘贴」
+    private func currentClipboard() -> String? {
+        let board = UIPasteboard.general
+        if board.changeCount != clipboardCache.change {
+            let text = board.hasStrings ? board.string?.trimmingCharacters(in: .whitespacesAndNewlines) : nil
+            clipboardCache = (board.changeCount, text)
+        }
+        return clipboardCache.text
     }
 
     /// 回复页：顶栏左边显示对方的消息；其他页显示 Typefree 标志
@@ -580,7 +632,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         replyPanel.setPhase(.generating)
         let requested = message
-        ReplyGenerator.generate(message: message, intent: replyIntent, tones: replyPanel.tones) { [weak self] result in
+        ReplyGenerator.generate(message: message, intent: replyIntent, style: replyPanel.style) { [weak self] result in
             guard let self, self.replyMessage == requested else { return }
             switch result {
             case .success(let replies): self.replyPanel.setPhase(.results(replies))
@@ -600,7 +652,7 @@ final class KeyboardViewController: UIInputViewController {
         }
         guard state != .recording, state != .processing else { return }
         pendingPurpose = .intent
-        bridge.writeStyle(StyleSelection())
+        bridge.writeStyle(StyleSelection(transient: true))
         startRecording()
     }
 
@@ -621,5 +673,17 @@ final class KeyboardViewController: UIInputViewController {
 
     @objc private func updateLevel() {
         voicePanel.micButton.pushLevel(bridge.readAudioLevel())
+    }
+}
+
+// 左右滑切页面：从可横滑的区域（候选条、语气、颜文字）或空格（长按移光标）开始的滑动不算
+extension KeyboardViewController: UIGestureRecognizerDelegate {
+    func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+        var v = touch.view
+        while let current = v, current !== view {
+            if current is UIScrollView || current.accessibilityIdentifier == SpaceTrackpad.identifier { return false }
+            v = current.superview
+        }
+        return true
     }
 }

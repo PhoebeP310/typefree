@@ -1,40 +1,49 @@
 import UIKit
 
-/// 语音页：语气（可多选、可横滑）· 翻译 / 麦克风 / 优化 · 状态行 · 底栏
+/// 语音页（方案 D）：语气网格 | 程度 · 篇幅 / 底栏 空格 · 麦克风 · 删除 · 发送
+/// 麦克风点一下 = 开始 / 结束；长按 = 边说边选这一句翻译成英文还是粤语
 final class VoicePanel: UIView {
     enum MicLook { case idle, recording, processing }
+    /// 长按松手时落在哪：普通出字 / 翻译 / 取消
+    enum HoldEnd: Equatable { case plain, translate(TranslateTarget), cancel }
 
     var onMicTap: (() -> Void)?
+    /// 长按开始：返回 false 表示现在不能开始（比如正在整理），就不弹翻译目标
+    var onMicHoldBegan: (() -> Bool)?
+    var onMicHoldEnded: ((HoldEnd) -> Void)?
     var onStyleChange: ((StyleSelection) -> Void)?
 
-    private(set) var style: StyleSelection
-    private var toneOrder: [Tone]
+    var style: StyleSelection { settingsArea.style }
     private let actions: KeyboardActions
 
-    private let toneScroll = UIScrollView()
-    private let toneStack = UIStackView()
-    private var chips: [Tone: ToneChip] = [:]
-    private let translateButton = SideToggle(title: "翻译", symbol: "character.bubble")
-    private let optimizeButton = SideToggle(title: "优化", symbol: "list.number")
+    private let settingsArea: StylePicker
     let micButton = MicButton()
-    private let statusLabel = UILabel()
+    private let messageLabel = PaddedLabel()
+    private var bubbles: [TranslateTarget: TargetBubble] = [:]
+    private var hover: HoldEnd = .plain
     private let returnButton = KeyButton(title: "发送", style: .function, fontSize: 15)
     private lazy var deleter = DeleteRepeater { [weak self] in self?.actions.deleteBackward() }
+    private lazy var trackpad = SpaceTrackpad(move: actions.moveCursor)
+    private let selection = UISelectionFeedbackGenerator()
 
-    init(style: StyleSelection, toneOrder: [Tone], actions: KeyboardActions) {
-        self.style = style
-        self.toneOrder = toneOrder
+    init(style: StyleSelection, actions: KeyboardActions) {
+        var style = style
+        style.migrateLengthTones()
+        style.translate = nil
+        // App 里隐藏了的、已经下架的（俏皮、佛系）语气不再生效
+        style.tones.removeAll { $0.isHidden || !Tone.defaultVoiceGrid.contains($0) }
+        self.settingsArea = StylePicker(style: style)
         self.actions = actions
         super.init(frame: .zero)
         build()
-        refreshSelection()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func setStatus(_ text: String, emphasized: Bool = false) {
-        statusLabel.text = text
-        statusLabel.textColor = emphasized ? KTheme.text : KTheme.secondary
+    /// 只放不写就不知道的话（权限、出错）；nil 隐藏
+    func setMessage(_ text: String?) {
+        messageLabel.text = text
+        messageLabel.isHidden = text == nil
     }
 
     func setMic(_ look: MicLook) { micButton.look = look }
@@ -44,60 +53,16 @@ final class VoicePanel: UIView {
     // MARK: - 布局
 
     private func build() {
-        // 语气
-        toneScroll.showsHorizontalScrollIndicator = false
-        toneScroll.alwaysBounceHorizontal = true
-        toneScroll.clipsToBounds = false
-        toneStack.axis = .horizontal
-        toneStack.spacing = 8
-        toneStack.alignment = .top
-        toneStack.translatesAutoresizingMaskIntoConstraints = false
-        toneScroll.addSubview(toneStack)
-        for tone in toneOrder {
-            let chip = ToneChip(tone: tone)
-            chip.addTarget(self, action: #selector(toneTapped(_:)), for: .touchUpInside)
-            chips[tone] = chip
-            toneStack.addArrangedSubview(chip)
+        settingsArea.onChange = { [weak self] style in
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            self?.onStyleChange?(style)
         }
-        NSLayoutConstraint.activate([
-            toneStack.leadingAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.leadingAnchor, constant: 4),
-            toneStack.trailingAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.trailingAnchor, constant: -24),
-            toneStack.topAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.topAnchor, constant: 6),
-            toneStack.bottomAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.bottomAnchor),
-            toneStack.heightAnchor.constraint(equalTo: toneScroll.frameLayoutGuide.heightAnchor, constant: -6),
-        ])
 
-        // 翻译 · 麦克风 · 优化（优化最常用，放最右）
-        translateButton.addTarget(self, action: #selector(translateTapped), for: .touchUpInside)
-        optimizeButton.addTarget(self, action: #selector(optimizeTapped), for: .touchUpInside)
-        micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
-        let mainRow = UIStackView(arrangedSubviews: [translateButton, micButton, optimizeButton])
-        mainRow.axis = .horizontal
-        mainRow.alignment = .center
-        mainRow.distribution = .equalSpacing
-
-        statusLabel.font = .systemFont(ofSize: 13)
-        statusLabel.textAlignment = .center
-        statusLabel.numberOfLines = 1
-        statusLabel.adjustsFontSizeToFitWidth = true
-        statusLabel.minimumScaleFactor = 0.75
-
-        let middle = UIStackView(arrangedSubviews: [mainRow, statusLabel])
-        middle.axis = .vertical
-        middle.spacing = 8
-        let middleWrap = UIView()
-        middle.translatesAutoresizingMaskIntoConstraints = false
-        middleWrap.addSubview(middle)
-        NSLayoutConstraint.activate([
-            middle.leadingAnchor.constraint(equalTo: middleWrap.leadingAnchor, constant: 4),
-            middle.trailingAnchor.constraint(equalTo: middleWrap.trailingAnchor, constant: -4),
-            middle.centerYAnchor.constraint(equalTo: middleWrap.centerYAnchor),
-        ])
-
-        // 底栏：🌐 · 空格 · 删除 · 发送
+        // 底栏：🌐 · 空格 · 麦克风 · 删除 · 发送
         let globe = KeyButton(image: "globe", style: .function)
         actions.attachGlobe(globe)
         let space = KeyButton(title: "空格", style: .function, fontSize: 15)
+        trackpad.attach(to: space)
         space.setTitleColor(KTheme.secondary, for: .normal)
         space.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
         let delete = KeyButton(image: "delete.left", style: .function)
@@ -105,13 +70,20 @@ final class VoicePanel: UIView {
         returnButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         returnButton.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)
         refreshReturnTitle()
-        let bottom = UIStackView(arrangedSubviews: [globe, space, delete, returnButton])
+        micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
+        let hold = UILongPressGestureRecognizer(target: self, action: #selector(micHeld(_:)))
+        hold.minimumPressDuration = 0.35
+        hold.allowableMovement = .greatestFiniteMagnitude
+        micButton.addGestureRecognizer(hold)
+        let bottom = UIStackView(arrangedSubviews: [globe, space, micButton, delete, returnButton])
         bottom.axis = .horizontal
+        bottom.alignment = .center
         bottom.spacing = 6
 
-        let root = UIStackView(arrangedSubviews: [toneScroll, middleWrap, bottom])
+        let root = UIStackView(arrangedSubviews: [settingsArea, bottom])
         root.axis = .vertical
         root.spacing = 0
+        root.distribution = .equalSpacing
         root.translatesAutoresizingMaskIntoConstraints = false
         addSubview(root)
         NSLayoutConstraint.activate([
@@ -119,55 +91,114 @@ final class VoicePanel: UIView {
             root.trailingAnchor.constraint(equalTo: trailingAnchor),
             root.topAnchor.constraint(equalTo: topAnchor),
             root.bottomAnchor.constraint(equalTo: bottomAnchor),
-            toneScroll.heightAnchor.constraint(equalToConstant: 66),
-            bottom.heightAnchor.constraint(equalToConstant: 44),
+            bottom.heightAnchor.constraint(equalToConstant: 52),
             globe.widthAnchor.constraint(equalToConstant: 44),
+            globe.heightAnchor.constraint(equalToConstant: 44),
+            space.heightAnchor.constraint(equalToConstant: 44),
             delete.widthAnchor.constraint(equalToConstant: 52),
-            returnButton.widthAnchor.constraint(equalToConstant: 72),
+            delete.heightAnchor.constraint(equalToConstant: 44),
+            returnButton.widthAnchor.constraint(equalToConstant: 64),
+            returnButton.heightAnchor.constraint(equalToConstant: 44),
         ])
+
+        // 出错 / 权限提示：盖在语气区上方居中
+        messageLabel.isHidden = true
+        messageLabel.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(messageLabel)
+        NSLayoutConstraint.activate([
+            messageLabel.centerXAnchor.constraint(equalTo: settingsArea.centerXAnchor),
+            messageLabel.centerYAnchor.constraint(equalTo: settingsArea.centerYAnchor),
+            messageLabel.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor, constant: -24),
+        ])
+
+        // 长按时弹出的翻译目标：麦克风左上 / 右上，拇指一滑就到
+        for (target, dx) in [(TranslateTarget.english, -62.0), (.cantonese, 62.0)] {
+            let bubble = TargetBubble(title: target.name)
+            bubble.isHidden = true
+            bubble.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(bubble)
+            NSLayoutConstraint.activate([
+                bubble.centerXAnchor.constraint(equalTo: micButton.centerXAnchor, constant: dx),
+                bubble.centerYAnchor.constraint(equalTo: micButton.centerYAnchor, constant: -90),
+            ])
+            bubbles[target] = bubble
+        }
     }
 
-    // MARK: - 交互
+    // MARK: - 选择
 
-    private func refreshSelection() {
-        for (tone, chip) in chips { chip.isOn = style.tones.contains(tone) }
-        translateButton.isOn = style.translate
-        optimizeButton.isOn = style.optimize
-    }
+    /// 回复页改了风格时同步过来
+    func setStyle(_ newStyle: StyleSelection) { settingsArea.style = newStyle }
 
-    @objc private func toneTapped(_ chip: ToneChip) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        style.toggle(chip.tone)
-        refreshSelection()
-        onStyleChange?(style)
-    }
-
-    @objc private func translateTapped() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        style.translate.toggle()
-        refreshSelection()
-        onStyleChange?(style)
-    }
-
-    @objc private func optimizeTapped() {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        style.optimize.toggle()
-        refreshSelection()
-        onStyleChange?(style)
-    }
+    // MARK: - 麦克风
 
     @objc private func micTapped() { onMicTap?() }
+
+    @objc private func micHeld(_ gesture: UILongPressGestureRecognizer) {
+        switch gesture.state {
+        case .began:
+            guard onMicHoldBegan?() == true else { gesture.isEnabled = false; gesture.isEnabled = true; return }
+            hover = .plain
+            showTargets(true)
+        case .changed:
+            let next = holdResult(at: gesture.location(in: self))
+            if next != hover {
+                hover = next
+                selection.selectionChanged()
+                refreshHover()
+            }
+        case .ended:
+            let result = holdResult(at: gesture.location(in: self))
+            showTargets(false)
+            onMicHoldEnded?(result)
+        case .cancelled, .failed:
+            if !bubbles.values.allSatisfy(\.isHidden) {
+                showTargets(false)
+                onMicHoldEnded?(.plain)
+            }
+        default:
+            break
+        }
+    }
+
+    /// 手指在哪：落在圆钮上（四周放宽 16）= 翻译；拖到麦克风下方 = 取消；其余 = 普通出字
+    private func holdResult(at point: CGPoint) -> HoldEnd {
+        for (target, bubble) in bubbles where bubble.frame.insetBy(dx: -16, dy: -16).contains(point) {
+            return .translate(target)
+        }
+        if point.y > micButton.frame.maxY + 24 || point.y > bounds.maxY + 8 { return .cancel }
+        return .plain
+    }
+
+    private func showTargets(_ show: Bool) {
+        UIView.animate(withDuration: 0.15) {
+            self.settingsArea.alpha = show ? 0.18 : 1
+            for bubble in self.bubbles.values {
+                bubble.isHidden = !show
+                bubble.isOn = false
+            }
+        }
+        if !show { hover = .plain }
+        micButton.isDimmed = false
+    }
+
+    private func refreshHover() {
+        for (target, bubble) in bubbles { bubble.isOn = hover == .translate(target) }
+        micButton.isDimmed = hover == .cancel
+    }
+
     @objc private func spaceTapped() { actions.insert(" ") }
     @objc private func returnTapped() { actions.returnKey() }
 }
 
-/// 一个语气：emoji 圆钮，选中变实心 + 右上角 ✓ + 下面出名字
+/// 一个语气：emoji 圆钮；选中变实心，名字做成小标签压在圆钮底边（不占位置，选上取消不挪动网格）
 final class ToneChip: UIControl {
+    static let size: CGFloat = 40
+
     let tone: Tone
     private let circle = UIView()
     private let emoji = UILabel()
-    private let badge = UIImageView()
-    private let nameLabel = UILabel()
+    private let nameTag = PaddedLabel(insets: UIEdgeInsets(top: 0, left: 5, bottom: 0, right: 5))
 
     var isOn = false { didSet { update() } }
 
@@ -178,46 +209,44 @@ final class ToneChip: UIControl {
         accessibilityTraits = .button
         isAccessibilityElement = true
 
-        circle.layer.cornerRadius = 20
-        circle.isUserInteractionEnabled = false
+        circle.layer.cornerRadius = Self.size / 2
         emoji.text = tone.emoji
         emoji.font = .systemFont(ofSize: 22)
         emoji.textAlignment = .center
-        badge.image = KTheme.sfImage("checkmark", 8, weight: .heavy)
-        badge.contentMode = .center
-        badge.layer.cornerRadius = 7.5
-        badge.layer.borderWidth = 2
-        badge.clipsToBounds = true
-        nameLabel.text = tone.name
-        nameLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-        nameLabel.textAlignment = .center
-        nameLabel.textColor = KTheme.text
+        nameTag.text = tone.name
+        nameTag.font = .systemFont(ofSize: 9, weight: .bold)
+        nameTag.textAlignment = .center
+        nameTag.layer.cornerRadius = 7
+        nameTag.layer.borderWidth = 2
+        nameTag.clipsToBounds = true
 
-        [circle, emoji, badge, nameLabel].forEach {
+        [circle, emoji, nameTag].forEach {
             $0.translatesAutoresizingMaskIntoConstraints = false
             $0.isUserInteractionEnabled = false
             addSubview($0)
         }
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 42),
-            heightAnchor.constraint(equalToConstant: 58),
+            widthAnchor.constraint(equalToConstant: Self.size),
+            heightAnchor.constraint(equalToConstant: Self.size),
             circle.topAnchor.constraint(equalTo: topAnchor),
-            circle.centerXAnchor.constraint(equalTo: centerXAnchor),
-            circle.widthAnchor.constraint(equalToConstant: 40),
-            circle.heightAnchor.constraint(equalToConstant: 40),
-            emoji.centerXAnchor.constraint(equalTo: circle.centerXAnchor),
-            emoji.centerYAnchor.constraint(equalTo: circle.centerYAnchor),
-            badge.widthAnchor.constraint(equalToConstant: 15),
-            badge.heightAnchor.constraint(equalToConstant: 15),
-            badge.topAnchor.constraint(equalTo: circle.topAnchor, constant: -4),
-            badge.trailingAnchor.constraint(equalTo: circle.trailingAnchor, constant: 4),
-            nameLabel.topAnchor.constraint(equalTo: circle.bottomAnchor, constant: 3),
-            nameLabel.centerXAnchor.constraint(equalTo: centerXAnchor),
+            circle.leadingAnchor.constraint(equalTo: leadingAnchor),
+            circle.trailingAnchor.constraint(equalTo: trailingAnchor),
+            circle.bottomAnchor.constraint(equalTo: bottomAnchor),
+            emoji.centerXAnchor.constraint(equalTo: centerXAnchor),
+            emoji.centerYAnchor.constraint(equalTo: centerYAnchor),
+            nameTag.centerXAnchor.constraint(equalTo: centerXAnchor),
+            nameTag.centerYAnchor.constraint(equalTo: bottomAnchor),
+            nameTag.heightAnchor.constraint(equalToConstant: 15),
         ])
         update()
     }
 
     required init?(coder: NSCoder) { fatalError() }
+
+    // 底边的名字标签露在外面，点它也算点这个语气
+    override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+        bounds.insetBy(dx: -4, dy: -6).contains(point)
+    }
 
     override func traitCollectionDidChange(_ previous: UITraitCollection?) {
         super.traitCollectionDidChange(previous)
@@ -228,66 +257,131 @@ final class ToneChip: UIControl {
         circle.backgroundColor = isOn ? KTheme.chipOn : .clear
         circle.layer.borderWidth = isOn ? 0 : 1
         circle.layer.borderColor = KTheme.chipStroke.resolvedColor(with: traitCollection).cgColor
-        badge.isHidden = !isOn
-        badge.backgroundColor = KTheme.chipOn
-        badge.tintColor = KTheme.chipOnText
-        // 徽标外圈用键盘底色描一圈，和圆钮分开
-        badge.layer.borderColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.17, alpha: 1) : UIColor(white: 0.82, alpha: 1) }
+        nameTag.isHidden = !isOn
+        nameTag.backgroundColor = KTheme.chipOn
+        nameTag.textColor = KTheme.chipOnText
+        // 标签外圈描一圈键盘底色，和圆钮分开
+        nameTag.layer.borderColor = UIColor { $0.userInterfaceStyle == .dark ? UIColor(white: 0.17, alpha: 1) : UIColor(white: 0.82, alpha: 1) }
             .resolvedColor(with: traitCollection).cgColor
-        nameLabel.isHidden = !isOn
         accessibilityValue = isOn ? "已选中" : "未选中"
     }
 }
 
-/// 麦克风两侧的翻译 / 优化开关
-final class SideToggle: UIControl {
-    private let icon = UIImageView()
-    private let label = UILabel()
+/// 竖排单选：程度（轻 / 中 / 重）、篇幅（精简 / 原样 / 扩充 / 梳理）
+final class SegmentColumn: UIView {
+    var onSelect: ((Int) -> Void)?
+    var selectedIndex = 0 { didSet { update() } }
+    /// 不生效时变暗，仍然可以点
+    var isActive = true { didSet { alpha = isActive ? 1 : 0.4 } }
 
-    var isOn = false { didSet { update() } }
+    private var buttons: [UIButton] = []
 
-    init(title: String, symbol: String) {
+    init(items: [String], label: String) {
         super.init(frame: .zero)
-        accessibilityLabel = title
-        accessibilityTraits = .button
-        isAccessibilityElement = true
-        layer.cornerRadius = 18
-        icon.image = KTheme.sfImage(symbol, 19)
-        icon.contentMode = .center
-        label.text = title
-        label.font = .systemFont(ofSize: 12)
-        let stack = UIStackView(arrangedSubviews: [icon, label])
+        accessibilityLabel = label
+        backgroundColor = KTheme.well
+        layer.cornerRadius = 9
+        let stack = UIStackView()
         stack.axis = .vertical
-        stack.alignment = .center
-        stack.spacing = 5
-        stack.isUserInteractionEnabled = false
+        stack.spacing = 2
+        stack.distribution = .fillEqually
+        for (i, item) in items.enumerated() {
+            let b = UIButton(type: .custom)
+            b.setTitle(item, for: .normal)
+            b.layer.cornerRadius = 7
+            b.tag = i
+            b.accessibilityLabel = "\(label)：\(item)"
+            b.addTarget(self, action: #selector(tapped(_:)), for: .touchUpInside)
+            buttons.append(b)
+            stack.addArrangedSubview(b)
+        }
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 64),
-            heightAnchor.constraint(equalToConstant: 72),
-            stack.centerXAnchor.constraint(equalTo: centerXAnchor),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+            stack.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
         ])
         update()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    override var isHighlighted: Bool { didSet { alpha = isHighlighted ? 0.7 : 1 } }
+    @objc private func tapped(_ sender: UIButton) {
+        guard sender.tag != selectedIndex else { return }
+        selectedIndex = sender.tag
+        onSelect?(sender.tag)
+    }
 
     private func update() {
-        backgroundColor = isOn ? KTheme.raised : KTheme.well
-        icon.tintColor = isOn ? KTheme.text : KTheme.secondary
-        label.textColor = isOn ? KTheme.text : KTheme.secondary
-        label.font = .systemFont(ofSize: 12, weight: isOn ? .semibold : .regular)
-        accessibilityValue = isOn ? "已打开" : "已关闭"
+        for b in buttons {
+            let on = b.tag == selectedIndex
+            b.backgroundColor = on ? KTheme.raised : .clear
+            b.setTitleColor(on ? KTheme.text : KTheme.secondary, for: .normal)
+            b.titleLabel?.font = .systemFont(ofSize: 12, weight: on ? .semibold : .regular)
+            b.accessibilityTraits = on ? [.button, .selected] : .button
+        }
     }
 }
 
-/// 中间的大麦克风：待机白色、录音红色带声波、整理中转圈
+/// 长按麦克风时弹出的翻译目标
+final class TargetBubble: UILabel {
+    var isOn = false { didSet { update() } }
+
+    init(title: String) {
+        super.init(frame: .zero)
+        text = title
+        textAlignment = .center
+        layer.cornerRadius = 24
+        clipsToBounds = true
+        widthAnchor.constraint(equalToConstant: 84).isActive = true
+        heightAnchor.constraint(equalToConstant: 48).isActive = true
+        update()
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    private func update() {
+        backgroundColor = isOn ? KTheme.mic : KTheme.fnKey
+        textColor = isOn ? KTheme.micIcon : KTheme.text
+        font = .systemFont(ofSize: 15, weight: isOn ? .bold : .medium)
+        transform = isOn ? CGAffineTransform(scaleX: 1.08, y: 1.08) : .identity
+    }
+}
+
+/// 带内边距的标签（出错提示、语气名字标签）
+final class PaddedLabel: UILabel {
+    private let insets: UIEdgeInsets
+
+    init(insets: UIEdgeInsets = UIEdgeInsets(top: 8, left: 14, bottom: 8, right: 14)) {
+        self.insets = insets
+        super.init(frame: .zero)
+        if insets.top > 0 {
+            font = .systemFont(ofSize: 13, weight: .medium)
+            textColor = KTheme.text
+            backgroundColor = KTheme.raised
+            numberOfLines = 2
+            textAlignment = .center
+            layer.cornerRadius = 12
+            clipsToBounds = true
+        }
+    }
+
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func drawText(in rect: CGRect) { super.drawText(in: rect.inset(by: insets)) }
+
+    override var intrinsicContentSize: CGSize {
+        let size = super.intrinsicContentSize
+        return CGSize(width: size.width + insets.left + insets.right, height: size.height + insets.top + insets.bottom)
+    }
+}
+
+/// 底栏麦克风：待机白色、录音红色带声波、整理中转圈；长按拖到取消区时变灰
 final class MicButton: UIControl {
     var look: VoicePanel.MicLook = .idle { didSet { update() } }
+    var isDimmed = false { didSet { update() } }
 
     private let icon = UIImageView()
     private let stop = UIView()
@@ -299,8 +393,8 @@ final class MicButton: UIControl {
         super.init(frame: frame)
         accessibilityTraits = .button
         isAccessibilityElement = true
-        layer.cornerRadius = 36
-        icon.image = KTheme.sfImage("mic.fill", 26, weight: .semibold)
+        layer.cornerRadius = 26
+        icon.image = KTheme.sfImage("mic.fill", 22, weight: .semibold)
         icon.contentMode = .center
         stop.layer.cornerRadius = 5
         stop.backgroundColor = .white
@@ -311,24 +405,24 @@ final class MicButton: UIControl {
             addSubview($0)
         }
         NSLayoutConstraint.activate([
-            widthAnchor.constraint(equalToConstant: 172),
-            heightAnchor.constraint(equalToConstant: 72),
+            widthAnchor.constraint(equalToConstant: 128),
+            heightAnchor.constraint(equalToConstant: 52),
             icon.centerXAnchor.constraint(equalTo: centerXAnchor),
             icon.centerYAnchor.constraint(equalTo: centerYAnchor),
             spinner.centerXAnchor.constraint(equalTo: centerXAnchor),
             spinner.centerYAnchor.constraint(equalTo: centerYAnchor),
             stop.centerXAnchor.constraint(equalTo: centerXAnchor),
             stop.centerYAnchor.constraint(equalTo: centerYAnchor),
-            stop.widthAnchor.constraint(equalToConstant: 20),
-            stop.heightAnchor.constraint(equalToConstant: 20),
-            leftWave.trailingAnchor.constraint(equalTo: stop.leadingAnchor, constant: -12),
-            rightWave.leadingAnchor.constraint(equalTo: stop.trailingAnchor, constant: 12),
+            stop.widthAnchor.constraint(equalToConstant: 10),
+            stop.heightAnchor.constraint(equalToConstant: 10),
+            leftWave.trailingAnchor.constraint(equalTo: stop.leadingAnchor, constant: -8),
+            rightWave.leadingAnchor.constraint(equalTo: stop.trailingAnchor, constant: 8),
             leftWave.centerYAnchor.constraint(equalTo: centerYAnchor),
             rightWave.centerYAnchor.constraint(equalTo: centerYAnchor),
-            leftWave.widthAnchor.constraint(equalToConstant: 40),
-            rightWave.widthAnchor.constraint(equalToConstant: 40),
-            leftWave.heightAnchor.constraint(equalToConstant: 28),
-            rightWave.heightAnchor.constraint(equalToConstant: 28),
+            leftWave.widthAnchor.constraint(equalToConstant: 30),
+            rightWave.widthAnchor.constraint(equalToConstant: 30),
+            leftWave.heightAnchor.constraint(equalToConstant: 20),
+            rightWave.heightAnchor.constraint(equalToConstant: 20),
         ])
         update()
     }
@@ -349,7 +443,7 @@ final class MicButton: UIControl {
             icon.tintColor = KTheme.micIcon
             accessibilityLabel = "开始说话"
         case .recording:
-            backgroundColor = KTheme.recording
+            backgroundColor = isDimmed ? KTheme.fnKey : KTheme.recording
             accessibilityLabel = "说完了"
         case .processing:
             backgroundColor = KTheme.mic

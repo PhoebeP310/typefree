@@ -42,6 +42,9 @@ public final class VoicePolishPipeline {
 
     public var sessionStyle: SessionStyle?
 
+    /// 本地改动：这一次要不要写进历史（iOS 回复页「说想法」是给 AI 的要求，不是要发出去的话，不记）。每次 process 前由调用方设置。
+    public var saveToHistory = true
+
     /// 可注入的音频保存器：把样本存档并返回音频文件名（如 "<id>.m4a"），失败/不保存返回 nil。
     /// macOS 设置它以保留历史音频；iOS 留 nil（不保留）。是否真正保存由调用方（含"保留音频"开关）决定。
     public var audioSaver: ((_ samples: [Float], _ id: String) -> String?)?
@@ -513,6 +516,10 @@ public final class VoicePolishPipeline {
         log(String(format: "Pipeline completed in %.0f ms", Double(durationMs)))
         emit(.done(text: correctedText), entryID)
 
+        guard saveToHistory else {
+            log("Not saved to history (transient)")
+            return
+        }
         let savedASR = rawASR ?? correctedText
         let saver = audioSaver
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -533,7 +540,7 @@ public final class VoicePolishPipeline {
     /// 没有 audioSaver（iOS）、编码失败、关了「保存历史」、加密不可用都是 false，调用方据此决定提不提「已存进历史」。
     private func preserveFailedAttempt(samples: [Float], entryID: String, pipelineStart: Date,
                                        completion: @escaping (_ saved: Bool) -> Void) {
-        guard let saver = audioSaver else { completion(false); return }
+        guard saveToHistory, let saver = audioSaver else { completion(false); return }
         let durationMs = Int(Date().timeIntervalSince(pipelineStart) * 1000)
         let polisher = aiPolisher
         DispatchQueue.global(qos: .utility).async { [weak self] in

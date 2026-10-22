@@ -17,26 +17,32 @@ final class ReplyPanel: UIView {
     var onIntentMic: (() -> Void)?
     var onClearIntent: (() -> Void)?
     var onPick: ((String) -> Void)?
-    var onTonesChange: (([Tone]) -> Void)?
+    var onStyleChange: ((StyleSelection) -> Void)?
 
-    private(set) var tones: [Tone]
+    /// 和语音页同一份选择（语气 / 程度 / 篇幅），这里只是交互不同：收起在按钮里，点开再选
+    var style: StyleSelection { picker.style }
     private(set) var phase: Phase = .empty
     private var intent: String?
     /// 出候选后又改了风格：「换一批」变成「按新风格重新生成」
     private var styleChangedSinceResults = false
 
     private let actions: KeyboardActions
-    private var chips: [Tone: ToneChip] = [:]
+    /// 风格默认收起，和「想法」「换一批」排在同一行；点「风格」展开
+    private var stylesExpanded = false
+    private let picker: StylePicker
+    private let styleButton = UIButton(type: .custom)
+    private let intentButton = UIButton(type: .custom)
+    private let refreshButton = UIButton(type: .custom)
     private let contentHost = UIView()
     private let returnButton = KeyButton(title: "发送", style: .function, fontSize: 15)
     private lazy var deleter = DeleteRepeater { [weak self] in self?.actions.deleteBackward() }
+    private lazy var trackpad = SpaceTrackpad(move: actions.moveCursor)
 
-    init(tones: [Tone], toneOrder: [Tone], actions: KeyboardActions) {
-        self.tones = tones
+    init(style: StyleSelection, actions: KeyboardActions) {
+        picker = StylePicker(style: style, excluding: [.review])
         self.actions = actions
         super.init(frame: .zero)
-        build(toneOrder: toneOrder)
-        refreshChips()
+        build()
         render()
     }
 
@@ -46,8 +52,15 @@ final class ReplyPanel: UIView {
 
     func setPhase(_ newPhase: Phase) {
         if case .results = newPhase { styleChangedSinceResults = false }
+        if newPhase == .generating || newPhase == .listening { stylesExpanded = false }
         phase = newPhase
         render()
+    }
+
+    /// 语音页改了风格时同步过来
+    func setStyle(_ newStyle: StyleSelection) {
+        picker.style = newStyle
+        renderActionRow()
     }
 
     func setIntent(_ text: String?) {
@@ -57,32 +70,18 @@ final class ReplyPanel: UIView {
 
     // MARK: - 布局
 
-    private func build(toneOrder: [Tone]) {
-        let toneScroll = UIScrollView()
-        toneScroll.showsHorizontalScrollIndicator = false
-        toneScroll.alwaysBounceHorizontal = true
-        toneScroll.clipsToBounds = false
-        let toneStack = UIStackView()
-        toneStack.axis = .horizontal
-        toneStack.spacing = 8
-        toneStack.alignment = .top
-        toneStack.translatesAutoresizingMaskIntoConstraints = false
-        toneScroll.addSubview(toneStack)
-        for tone in toneOrder where tone != .review {
-            let chip = ToneChip(tone: tone)
-            chip.addTarget(self, action: #selector(toneTapped(_:)), for: .touchUpInside)
-            chips[tone] = chip
-            toneStack.addArrangedSubview(chip)
+    private func build() {
+        picker.isHidden = true
+        picker.onChange = { [weak self] style in
+            guard let self else { return }
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            self.onStyleChange?(style)
+            if case .results = self.phase { self.styleChangedSinceResults = true }
+            self.renderActionRow()
         }
-        NSLayoutConstraint.activate([
-            toneStack.leadingAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.leadingAnchor, constant: 4),
-            toneStack.trailingAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.trailingAnchor, constant: -24),
-            toneStack.topAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.topAnchor, constant: 6),
-            toneStack.bottomAnchor.constraint(equalTo: toneScroll.contentLayoutGuide.bottomAnchor),
-            toneStack.heightAnchor.constraint(equalTo: toneScroll.frameLayoutGuide.heightAnchor, constant: -6),
-        ])
 
         let space = KeyButton(title: "空格", style: .function, fontSize: 15)
+        trackpad.attach(to: space)
         space.setTitleColor(KTheme.secondary, for: .normal)
         space.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
         let delete = KeyButton(image: "delete.left", style: .function)
@@ -96,7 +95,27 @@ final class ReplyPanel: UIView {
         bottom.axis = .horizontal
         bottom.spacing = 6
 
-        let root = UIStackView(arrangedSubviews: [toneScroll, contentHost, bottom])
+        for b in [styleButton, intentButton, refreshButton] {
+            b.titleLabel?.font = .systemFont(ofSize: 13)
+            b.titleLabel?.lineBreakMode = .byTruncatingTail
+            b.layer.cornerRadius = 15
+            b.contentEdgeInsets = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
+            b.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        }
+        styleButton.backgroundColor = KTheme.well
+        intentButton.backgroundColor = KTheme.well
+        styleButton.addTarget(self, action: #selector(styleTapped), for: .touchUpInside)
+        intentButton.addTarget(self, action: #selector(intentRowTapped), for: .touchUpInside)
+        refreshButton.addTarget(self, action: #selector(generateTapped), for: .touchUpInside)
+        intentButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        styleButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        refreshButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let actionRow = UIStackView(arrangedSubviews: [styleButton, intentButton, UIView(), refreshButton])
+        actionRow.axis = .horizontal
+        actionRow.spacing = 8
+        actionRow.alignment = .center
+
+        let root = UIStackView(arrangedSubviews: [actionRow, picker, contentHost, bottom])
         root.axis = .vertical
         root.spacing = 6
         root.translatesAutoresizingMaskIntoConstraints = false
@@ -106,7 +125,7 @@ final class ReplyPanel: UIView {
             root.trailingAnchor.constraint(equalTo: trailingAnchor),
             root.topAnchor.constraint(equalTo: topAnchor),
             root.bottomAnchor.constraint(equalTo: bottomAnchor),
-            toneScroll.heightAnchor.constraint(equalToConstant: 64),
+            actionRow.heightAnchor.constraint(equalToConstant: 30),
             bottom.heightAnchor.constraint(equalToConstant: 44),
             globe.widthAnchor.constraint(equalToConstant: 44),
             delete.widthAnchor.constraint(equalToConstant: 52),
@@ -114,13 +133,47 @@ final class ReplyPanel: UIView {
         ])
     }
 
-    private func refreshChips() {
-        for (tone, chip) in chips { chip.isOn = tones.contains(tone) }
-    }
-
     // MARK: - 各状态
 
+    private func renderActionRow() {
+        picker.isHidden = !stylesExpanded
+        contentHost.isHidden = stylesExpanded   // 展开选风格时内容区让出位置，收起再回来
+        let styleTitle = stylesExpanded ? "收起" : Self.styleTitle(style)
+        styleButton.setTitle(styleTitle, for: .normal)
+        styleButton.setImage(KTheme.sfImage(stylesExpanded ? "chevron.up" : "chevron.down", 10, weight: .semibold), for: .normal)
+        styleButton.semanticContentAttribute = .forceRightToLeft
+        styleButton.imageEdgeInsets = UIEdgeInsets(top: 0, left: 4, bottom: 0, right: -4)
+        styleButton.tintColor = KTheme.secondary
+        styleButton.setTitleColor(KTheme.text, for: .normal)
+
+        let hasMessage = phase != .empty
+        intentButton.isHidden = !hasMessage
+        if let intent {
+            intentButton.setImage(nil, for: .normal)
+            intentButton.setTitle("想法：\(intent)  ✕", for: .normal)
+            intentButton.setTitleColor(KTheme.text, for: .normal)
+        } else {
+            intentButton.setImage(KTheme.sfImage("mic.fill", 11), for: .normal)
+            intentButton.tintColor = KTheme.secondary
+            intentButton.setTitle(" 想法", for: .normal)
+            intentButton.setTitleColor(KTheme.secondary, for: .normal)
+        }
+
+        var showRefresh = false
+        if case .results = phase { showRefresh = true }
+        if case .failed = phase { showRefresh = true }
+        refreshButton.isHidden = !showRefresh
+        let emphasize = styleChangedSinceResults
+        refreshButton.setImage(KTheme.sfImage("arrow.clockwise", 11, weight: .semibold), for: .normal)
+        refreshButton.tintColor = emphasize ? KTheme.text : KTheme.secondary
+        refreshButton.setTitle(emphasize ? " 按新风格重新生成" : " 换一批", for: .normal)
+        refreshButton.setTitleColor(emphasize ? KTheme.text : KTheme.secondary, for: .normal)
+        refreshButton.titleLabel?.font = .systemFont(ofSize: 13, weight: emphasize ? .semibold : .regular)
+        refreshButton.contentEdgeInsets = UIEdgeInsets(top: 0, left: 4, bottom: 0, right: 2)
+    }
+
     private func render() {
+        renderActionRow()
         contentHost.subviews.forEach { $0.removeFromSuperview() }
         let view: UIView
         switch phase {
@@ -202,7 +255,7 @@ final class ReplyPanel: UIView {
         let speak = pill("说想法", symbol: "mic.fill", primary: false, width: 150, action: #selector(intentTapped))
         let row = UIStackView(arrangedSubviews: [generate, speak])
         row.spacing = 10
-        return centered([row, label("可以先选风格；说想法的话，说完就自动生成", size: 12, color: KTheme.secondary)])
+        return centered([row, label("想换风格点左上角；说想法的话，说完就自动生成", size: 12, color: KTheme.secondary)])
     }
 
     private func listeningView() -> UIView {
@@ -230,36 +283,6 @@ final class ReplyPanel: UIView {
     }
 
     private func resultsView(_ replies: [String]) -> UIView {
-        // 顶上一行：想法（✕ 去掉）或「加个想法」· 换一批
-        let left = UIButton(type: .custom)
-        left.titleLabel?.font = .systemFont(ofSize: 12)
-        left.setTitleColor(KTheme.secondary, for: .normal)
-        left.backgroundColor = KTheme.well
-        left.layer.cornerRadius = 12
-        left.contentEdgeInsets = UIEdgeInsets(top: 0, left: 10, bottom: 0, right: 10)
-        left.titleLabel?.lineBreakMode = .byTruncatingTail
-        if let intent {
-            left.setTitle("想法：\(intent)  ✕", for: .normal)
-            left.addTarget(self, action: #selector(clearIntentTapped), for: .touchUpInside)
-        } else {
-            left.setImage(KTheme.sfImage("mic.fill", 11), for: .normal)
-            left.tintColor = KTheme.secondary
-            left.setTitle(" 加个想法", for: .normal)
-            left.addTarget(self, action: #selector(intentTapped), for: .touchUpInside)
-        }
-        let refresh = UIButton(type: .custom)
-        refresh.setImage(KTheme.sfImage("arrow.clockwise", 11, weight: .semibold), for: .normal)
-        refresh.tintColor = styleChangedSinceResults ? KTheme.text : KTheme.secondary
-        refresh.setTitle(styleChangedSinceResults ? " 按新风格重新生成" : " 换一批", for: .normal)
-        refresh.setTitleColor(styleChangedSinceResults ? KTheme.text : KTheme.secondary, for: .normal)
-        refresh.titleLabel?.font = .systemFont(ofSize: 12, weight: styleChangedSinceResults ? .semibold : .regular)
-        refresh.addTarget(self, action: #selector(generateTapped), for: .touchUpInside)
-        let top = UIStackView(arrangedSubviews: [left, UIView(), refresh])
-        top.axis = .horizontal
-        top.spacing = 8
-        left.heightAnchor.constraint(equalToConstant: 24).isActive = true
-        left.widthAnchor.constraint(lessThanOrEqualToConstant: 230).isActive = true
-
         let list = UIStackView()
         list.axis = .vertical
         list.spacing = 6
@@ -269,7 +292,7 @@ final class ReplyPanel: UIView {
             card.layer.cornerRadius = 12
             card.contentHorizontalAlignment = .left
             card.contentEdgeInsets = UIEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
-            card.titleLabel?.numberOfLines = 2
+            card.titleLabel?.numberOfLines = 3
             card.titleLabel?.font = .systemFont(ofSize: 14)
             card.titleLabel?.lineBreakMode = .byTruncatingTail
             card.setTitle(reply, for: .normal)
@@ -289,28 +312,34 @@ final class ReplyPanel: UIView {
             list.bottomAnchor.constraint(equalTo: scroll.contentLayoutGuide.bottomAnchor),
             list.widthAnchor.constraint(equalTo: scroll.frameLayoutGuide.widthAnchor),
         ])
-        let stack = UIStackView(arrangedSubviews: [top, scroll])
-        stack.axis = .vertical
-        stack.spacing = 6
-        return stack
+        return scroll
     }
 
     // MARK: - 交互
 
-    @objc private func toneTapped(_ chip: ToneChip) {
-        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-        var selection = StyleSelection(tones: tones)
-        selection.toggle(chip.tone)
-        tones = selection.tones
-        refreshChips()
-        onTonesChange?(tones)
-        if case .results = phase {
-            styleChangedSinceResults = true
-            render()
-        }
+    /// 收起时按钮上显示选了什么：已选 emoji，加上不是默认的程度 / 篇幅，如「😜🤔 轻 · 扩充」
+    static func styleTitle(_ style: StyleSelection) -> String {
+        let tones = style.tones.filter { $0 != .review }
+        var parts: [String] = []
+        if !tones.isEmpty, style.intensity != .medium { parts.append(style.intensity.name) }
+        if style.length != .original { parts.append(style.length.name) }
+        let emoji = tones.map(\.emoji).joined()
+        let text = parts.joined(separator: " · ")
+        if emoji.isEmpty && text.isEmpty { return "风格" }
+        return [emoji, text].filter { !$0.isEmpty }.joined(separator: " ")
     }
 
     @objc private func generateTapped() { onGenerate?() }
+
+    @objc private func styleTapped() {
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        stylesExpanded.toggle()
+        renderActionRow()
+    }
+
+    @objc private func intentRowTapped() {
+        if intent != nil { onClearIntent?() } else { onIntentMic?() }
+    }
     @objc private func intentTapped() { onIntentMic?() }
     @objc private func clearIntentTapped() { onClearIntent?() }
     @objc private func cardTapped(_ sender: UIButton) {

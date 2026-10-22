@@ -20,6 +20,7 @@ final class KaomojiPanel: UIView {
     private let gridStack = UIStackView()
     private let returnButton = KeyButton(title: "发送", style: .function, fontSize: 15)
     private lazy var deleter = DeleteRepeater { [weak self] in self?.actions.deleteBackward() }
+    private lazy var trackpad = SpaceTrackpad(move: actions.moveCursor)
 
     init(actions: KeyboardActions) {
         self.actions = actions
@@ -87,6 +88,7 @@ final class KaomojiPanel: UIView {
         let globe = KeyButton(image: "globe", style: .function)
         actions.attachGlobe(globe)
         let space = KeyButton(title: "空格", style: .function, fontSize: 15)
+        trackpad.attach(to: space)
         space.setTitleColor(KTheme.secondary, for: .normal)
         space.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
         let delete = KeyButton(image: "delete.left", style: .function)

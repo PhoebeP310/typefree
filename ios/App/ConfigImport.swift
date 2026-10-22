@@ -52,6 +52,17 @@ enum ConfigImport {
             .filter { secretKeys.contains($0.key) && !$0.value.isEmpty }
 
         var values = config
+        // 手机上删过的热词（记在 hot_words_blocked）导入时跳过，免得一导入全回来
+        let blocked = VoicePolishConfig.shared.loadConfig()[SyncedHotWords.blockedKey] as? [String] ?? []
+        if !blocked.isEmpty {
+            for word in blocked {
+                let r = SyncedHotWords.block(word, hotWords: values[SyncedHotWords.hotWordsKey] as? [String] ?? [],
+                                             groupMap: values[SyncedHotWords.groupsKey] as? [String: [String]],
+                                             blocked: blocked)
+                values[SyncedHotWords.hotWordsKey] = r.hotWords
+                if let g = r.groups { values[SyncedHotWords.groupsKey] = g }
+            }
+        }
         for (key, value) in secrets { values[key] = value }
         VoicePolishConfig.shared.save(values: values)
 

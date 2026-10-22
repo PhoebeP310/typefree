@@ -17,6 +17,7 @@ final class LetterPanel: UIView {
     private let layerButton = KeyButton(title: "123", style: .function, fontSize: 15)
     private let returnButton = KeyButton(title: "发送", style: .function, fontSize: 15)
     private lazy var deleter = DeleteRepeater { [weak self] in self?.actions.deleteBackward() }
+    private lazy var trackpad = SpaceTrackpad(move: actions.moveCursor)
 
     /// placeholder 非空 = 只显示这句提示和底栏（「拼」页）
     init(actions: KeyboardActions, placeholder: String? = nil) {
@@ -39,6 +40,7 @@ final class LetterPanel: UIView {
         actions.attachGlobe(globe)
         layerButton.addTarget(self, action: #selector(layerTapped), for: .touchUpInside)
         let space = KeyButton(title: placeholder == nil ? "space" : "空格", style: .letter, fontSize: 15)
+        trackpad.attach(to: space)
         space.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
         returnButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         returnButton.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)

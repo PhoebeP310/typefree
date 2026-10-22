@@ -11,9 +11,32 @@ final class PinyinPanel: UIView {
     private let actions: KeyboardActions
     private let engine = RimeEngine.shared
     private var composing = false
+    /// 这一串自己敲过的字母：回车上屏原文时，万一引擎那边取不到就用它
+    private var typed = ""
+    /// 输入框里现在有没有「输入中」的字母
+    private var hasMarked = false
     private var engineFailed = false
     private let returnButton = KeyButton(title: "发送", style: .function, fontSize: 15)
+    private let lettersStack = UIStackView()
+    private let symbolsStack = UIStackView()
+
+    /// 数字和中文标点，照 iOS 原生中文键盘：「123」进，「#+=」看更多符号，左下「拼」回字母
+    private static let numberRows: [[String]] = [
+        ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"],
+        ["-", "/", "：", "；", "（", "）", "¥", "@", "“", "”"],
+        ["。", "，", "、", "？", "！", "."],
+    ]
+    private static let moreRows: [[String]] = [
+        ["【", "】", "｛", "｝", "#", "%", "^", "*", "+", "="],
+        ["_", "—", "\\", "｜", "～", "《", "》", "$", "&", "·"],
+        ["…", "，", "^_^", "？", "！", "‘"],
+    ]
+    private enum SymbolLayer { case none, numbers, more }
+    private var symbolLayer = SymbolLayer.none { didSet { applySymbolLayer() } }
+    private var bottomComma: KeyButton?
+    private var bottomLayerKey: KeyButton?
     private lazy var deleter = DeleteRepeater { [weak self] in self?.deleteTapped() }
+    private lazy var trackpad = SpaceTrackpad(move: actions.moveCursor)
 
     private static let rows: [[(String, String)]] = [
         [("q", "iu"), ("w", "ei"), ("e", "e"), ("r", "uan"), ("t", "ue"), ("y", "un"), ("u", "sh"), ("i", "ch"), ("o", "uo"), ("p", "ie")],
@@ -25,23 +48,27 @@ final class PinyinPanel: UIView {
         self.actions = actions
         super.init(frame: .zero)
         candidateBar.onSelect = { [weak self] index in self?.selectCandidate(index) }
+        trackpad.isAllowed = { [weak self] in !(self?.composing ?? false) }
         build()
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func refreshReturnTitle() { returnButton.setTitle(actions.returnTitle(), for: .normal) }
+    /// 输入中回车 = 把敲的字母原样上屏（中英夹杂时直接敲英文），键上写「确认」，和系统拼音一致
+    func refreshReturnTitle() { returnButton.setTitle(composing ? "确认" : actions.returnTitle(), for: .normal) }
 
     /// 离开这一页或键盘收起：丢掉没上屏的拼音
     func reset() {
         engine.clear()
+        clearMarked()
+        symbolLayer = .none
         refresh()
     }
 
     // MARK: - 布局
 
     private func build() {
-        let rowsStack = UIStackView()
+        let rowsStack = lettersStack
         rowsStack.axis = .vertical
         rowsStack.spacing = 12
         rowsStack.distribution = .fillEqually
@@ -59,9 +86,9 @@ final class PinyinPanel: UIView {
             line.axis = .horizontal
             line.spacing = 6
             if index == 2 {
-                let apostrophe = KeyButton(title: "'", style: .function, fontSize: 20)
-                apostrophe.accessibilityLabel = "分词"
-                apostrophe.addTarget(self, action: #selector(apostropheTapped), for: .touchUpInside)
+                let apostrophe = KeyButton(title: "123", style: .function, fontSize: 15)
+                apostrophe.accessibilityLabel = "数字和符号"
+                apostrophe.addTarget(self, action: #selector(layerTapped), for: .touchUpInside)
                 let delete = KeyButton(image: "delete.left", style: .function)
                 deleter.attach(to: delete)
                 [apostrophe, keyRow, delete].forEach { line.addArrangedSubview($0) }
@@ -89,8 +116,11 @@ final class PinyinPanel: UIView {
         let comma = KeyButton(title: "，", style: .function, fontSize: 18)
         comma.addTarget(self, action: #selector(commaTapped), for: .touchUpInside)
         let english = KeyButton(title: "英", style: .function, fontSize: 15)
-        english.addTarget(self, action: #selector(englishTapped), for: .touchUpInside)
+        english.addTarget(self, action: #selector(bottomLayerTapped), for: .touchUpInside)
+        bottomComma = comma
+        bottomLayerKey = english
         let space = KeyButton(title: "空格", style: .letter, fontSize: 15)
+        trackpad.attach(to: space)
         space.addTarget(self, action: #selector(spaceTapped), for: .touchUpInside)
         returnButton.titleLabel?.font = .systemFont(ofSize: 15, weight: .semibold)
         returnButton.addTarget(self, action: #selector(returnTapped), for: .touchUpInside)
@@ -101,7 +131,11 @@ final class PinyinPanel: UIView {
         bottom.axis = .horizontal
         bottom.spacing = 6
 
-        let root = UIStackView(arrangedSubviews: [rowsStack, bottom])
+        symbolsStack.axis = .vertical
+        symbolsStack.spacing = 12
+        symbolsStack.distribution = .fillEqually
+        symbolsStack.isHidden = true
+        let root = UIStackView(arrangedSubviews: [rowsStack, symbolsStack, bottom])
         root.axis = .vertical
         root.spacing = 12
         root.translatesAutoresizingMaskIntoConstraints = false
@@ -124,15 +158,35 @@ final class PinyinPanel: UIView {
     private func refresh() {
         let state = engine.state()
         candidateBar.show(preedit: state.preedit, candidates: state.candidates)
+        // 敲的字母（如 hcxl）直接显示在输入框里，带下划线，和系统拼音一样；选了候选或清空时换掉
+        if state.isComposing {
+            let raw = engine.rawInput()
+            actions.setMarked(raw.isEmpty ? typed : raw)
+            hasMarked = true
+        } else {
+            clearMarked()
+        }
         if state.isComposing != composing {
             composing = state.isComposing
+            if !composing { typed = "" }
+            refreshReturnTitle()
             onComposingChange?(composing)
         }
     }
 
     private func commit(_ text: String?) {
-        if let text, !text.isEmpty { actions.insert(text) }
+        if let text, !text.isEmpty {
+            clearMarked()   // 先撤掉输入中的字母，再上屏选中的字
+            actions.insert(text)
+        }
         refresh()
+    }
+
+    private func clearMarked() {
+        guard hasMarked else { return }
+        actions.setMarked("")
+        actions.unmark()
+        hasMarked = false
     }
 
     private func ensureEngine() -> Bool {
@@ -148,16 +202,78 @@ final class PinyinPanel: UIView {
 
     @objc private func letterTapped(_ sender: HintKeyButton) {
         guard ensureEngine() else { return }
+        if !composing { typed = "" }
+        typed.append(sender.letter)
         commit(engine.input(Character(sender.letter)))
     }
 
-    @objc private func apostropheTapped() {
-        guard composing, ensureEngine() else { return }
-        commit(engine.input("'"))
+    private func buildSymbols(_ rows: [[String]]) {
+        symbolsStack.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for (index, row) in rows.enumerated() {
+            let keys = row.map { title -> UIButton in
+                let b = KeyButton(title: title, style: .letter, fontSize: title.count > 1 ? 16 : 20)
+                b.addTarget(self, action: #selector(symbolTapped(_:)), for: .touchUpInside)
+                return b
+            }
+            let keyRow = UIStackView(arrangedSubviews: keys)
+            keyRow.axis = .horizontal
+            keyRow.spacing = 6
+            keyRow.distribution = .fillEqually
+            if index == 2 {
+                // 第三行：#+= / 123 · 六个标点（键更宽）· 删除
+                let toggle = KeyButton(title: symbolLayer == .more ? "123" : "#+=", style: .function, fontSize: 15)
+                toggle.addTarget(self, action: #selector(moreTapped), for: .touchUpInside)
+                let delete = KeyButton(image: "delete.left", style: .function)
+                deleter.attach(to: delete)
+                let line = UIStackView(arrangedSubviews: [toggle, keyRow, delete])
+                line.axis = .horizontal
+                line.spacing = 14
+                toggle.widthAnchor.constraint(equalToConstant: 46).isActive = true
+                delete.widthAnchor.constraint(equalToConstant: 46).isActive = true
+                symbolsStack.addArrangedSubview(line)
+            } else {
+                symbolsStack.addArrangedSubview(keyRow)
+            }
+        }
+    }
+
+    private func applySymbolLayer() {
+        switch symbolLayer {
+        case .none: break
+        case .numbers: buildSymbols(Self.numberRows)
+        case .more: buildSymbols(Self.moreRows)
+        }
+        let symbols = symbolLayer != .none
+        symbolsStack.isHidden = !symbols
+        lettersStack.isHidden = symbols
+        // 符号层：左下角换成「拼」回字母（和原生键盘「123」/「拼」同一个位置），「，」隐藏
+        bottomComma?.isHidden = symbols
+        bottomLayerKey?.setTitle(symbols ? "拼" : "英", for: .normal)
+        bottomLayerKey?.accessibilityLabel = symbols ? "回到拼音" : "英文键盘"
+    }
+
+    /// 字母层第三行左边的「123」
+    @objc private func layerTapped() {
+        if composing { selectCandidate(0) }
+        symbolLayer = .numbers
+    }
+
+    @objc private func moreTapped() { symbolLayer = symbolLayer == .more ? .numbers : .more }
+
+    /// 底栏「英」：字母层 = 去英文页；符号层 = 回字母
+    @objc private func bottomLayerTapped() {
+        if symbolLayer != .none { symbolLayer = .none } else { englishTapped() }
+    }
+
+    @objc private func symbolTapped(_ sender: UIButton) {
+        guard let t = sender.title(for: .normal) else { return }
+        if composing { selectCandidate(0) }
+        actions.insert(t)
     }
 
     private func deleteTapped() {
         if composing {
+            if !typed.isEmpty { typed.removeLast() }
             engine.backspace()
             refresh()
         } else {
@@ -175,9 +291,20 @@ final class PinyinPanel: UIView {
 
     @objc private func returnTapped() {
         if composing {
+            // 输入框里已经是敲的字母：直接确定下来，不再另插一遍
+            if hasMarked {
+                actions.unmark()
+                hasMarked = false
+                engine.clear()
+                typed = ""
+                refresh()
+                return
+            }
             let raw = engine.rawInput()
+            let text = raw.isEmpty ? typed : raw
             engine.clear()
-            commit(raw)
+            typed = ""
+            commit(text)
         } else {
             actions.returnKey()
         }
@@ -218,7 +345,7 @@ final class HintKeyButton: KeyButton {
     required init?(coder: NSCoder) { fatalError() }
 }
 
-/// 输入中盖在顶栏上的候选条：左边拼音，右边可横滑的候选
+/// 输入中盖在顶栏上的候选条：上面一行小字拼音（太长只显示末尾），下面一整行候选，可横滑
 final class CandidateBar: UIView {
     var onSelect: ((Int) -> Void)?
 
@@ -228,28 +355,28 @@ final class CandidateBar: UIView {
 
     override init(frame: CGRect) {
         super.init(frame: frame)
-        preeditLabel.font = .systemFont(ofSize: 13)
+        preeditLabel.font = .systemFont(ofSize: 11)
         preeditLabel.textColor = KTheme.secondary
-        preeditLabel.setContentHuggingPriority(.required, for: .horizontal)
-        preeditLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        preeditLabel.lineBreakMode = .byTruncatingHead
         scroll.showsHorizontalScrollIndicator = false
         stack.axis = .horizontal
         stack.spacing = 18
         stack.alignment = .center
         stack.translatesAutoresizingMaskIntoConstraints = false
         scroll.addSubview(stack)
-        let row = UIStackView(arrangedSubviews: [preeditLabel, scroll])
-        row.axis = .horizontal
-        row.spacing = 14
-        row.alignment = .center
-        row.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(row)
+        [preeditLabel, scroll].forEach {
+            $0.translatesAutoresizingMaskIntoConstraints = false
+            addSubview($0)
+        }
         NSLayoutConstraint.activate([
-            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            row.trailingAnchor.constraint(equalTo: trailingAnchor),
-            row.topAnchor.constraint(equalTo: topAnchor),
-            row.bottomAnchor.constraint(equalTo: bottomAnchor),
-            scroll.heightAnchor.constraint(equalTo: row.heightAnchor),
+            preeditLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            preeditLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            preeditLabel.topAnchor.constraint(equalTo: topAnchor, constant: -4),
+            preeditLabel.heightAnchor.constraint(equalToConstant: 13),
+            scroll.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
+            scroll.trailingAnchor.constraint(equalTo: trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: preeditLabel.bottomAnchor, constant: 1),
+            scroll.bottomAnchor.constraint(equalTo: bottomAnchor, constant: 2),
             stack.leadingAnchor.constraint(equalTo: scroll.contentLayoutGuide.leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: scroll.contentLayoutGuide.trailingAnchor, constant: -8),
             stack.topAnchor.constraint(equalTo: scroll.contentLayoutGuide.topAnchor),

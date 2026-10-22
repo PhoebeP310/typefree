@@ -24,6 +24,16 @@ final class SharedBridge {
     func writeStyle(_ style: StyleSelection) { write(style, "style") }
     func readStyle() -> StyleSelection { read(StyleSelection.self, "style") ?? StyleSelection() }
 
+    // MARK: - 键盘报到（键盘出现且有完全访问时写；没有完全访问写不进共享钥匙串，所以写得进就说明开了）
+
+    func markKeyboardSeen() { write(Date().timeIntervalSince1970, "keyboard_seen") }
+    func keyboardSeen() -> Bool { read(Double.self, "keyboard_seen") != nil }
+
+    // MARK: - 语气自定义（主 App 设置页写，键盘和主 App 读）
+
+    func writeToneOverrides(_ overrides: [String: ToneOverride]) { write(overrides, "tone_overrides") }
+    func readToneOverrides() -> [String: ToneOverride] { read([String: ToneOverride].self, "tone_overrides") ?? [:] }
+
     // MARK: - 录音快照（主 App → 键盘）
 
     func readSnapshot() -> RecordingSessionSnapshot? { read(RecordingSessionSnapshot.self, "snapshot") }

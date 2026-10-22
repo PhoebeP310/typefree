@@ -105,4 +105,77 @@ struct KeyboardActions {
     /// 给 🌐 键挂系统的切换输入法手势
     var attachGlobe: (UIButton) -> Void
     var returnTitle: () -> String
+    /// 按字符移动光标（长按空格拖动）
+    var moveCursor: (Int) -> Void
+    /// 输入框里「输入中」的字（带下划线、还没确定）；传空串清掉
+    var setMarked: (String) -> Void
+    /// 把输入中的字原样留在输入框里
+    var unmark: () -> Void
+}
+
+/// 长按空格变触控板：按住后左右拖动移动光标，松手恢复，不输入空格
+final class SpaceTrackpad: NSObject {
+    static let identifier = "typefree.space"
+
+    private let move: (Int) -> Void
+    /// 返回 false 时不进入触控板（如双拼正在输入）
+    var isAllowed: () -> Bool = { true }
+    private weak var button: UIButton?
+    private var savedTitle: String?
+    private var lastX: CGFloat = 0
+    private var accumulated: CGFloat = 0
+    private let step: CGFloat = 9
+    private let feedback = UISelectionFeedbackGenerator()
+
+    init(move: @escaping (Int) -> Void) {
+        self.move = move
+    }
+
+    func attach(to button: UIButton) {
+        self.button = button
+        button.accessibilityIdentifier = Self.identifier
+        let press = UILongPressGestureRecognizer(target: self, action: #selector(handle(_:)))
+        press.minimumPressDuration = 0.35
+        press.allowableMovement = .greatestFiniteMagnitude
+        button.addGestureRecognizer(press)
+    }
+
+    @objc private func handle(_ g: UILongPressGestureRecognizer) {
+        guard let button else { return }
+        let x = g.location(in: button).x
+        switch g.state {
+        case .began:
+            guard isAllowed() else {
+                g.isEnabled = false
+                g.isEnabled = true
+                return
+            }
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+            feedback.prepare()
+            lastX = x
+            accumulated = 0
+            savedTitle = button.title(for: .normal)
+            button.setTitle("", for: .normal)
+            button.alpha = 0.6
+        case .changed:
+            accumulated += x - lastX
+            lastX = x
+            while accumulated >= step {
+                move(1)
+                accumulated -= step
+                feedback.selectionChanged()
+            }
+            while accumulated <= -step {
+                move(-1)
+                accumulated += step
+                feedback.selectionChanged()
+            }
+        default:
+            if savedTitle != nil {
+                button.setTitle(savedTitle, for: .normal)
+                savedTitle = nil
+            }
+            button.alpha = 1
+        }
+    }
 }

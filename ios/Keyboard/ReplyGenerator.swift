@@ -35,13 +35,35 @@ enum ReplyGenerator {
         return nil
     }
 
-    static func systemPrompt(tones: [Tone]) -> String {
-        let style: String
-        if tones.isEmpty {
-            style = "- 自然、得体，像平时跟这个人聊天的口吻"
-        } else {
-            style = tones.map { "- \($0.name)：\($0.rule)\n  例：「\($0.example.input)」→「\($0.example.output)」" }.joined(separator: "\n")
+    static func systemPrompt(style selection: StyleSelection) -> String {
+        let tones = selection.tones.filter { $0 != .review }
+        var lines: [String] = tones.isEmpty
+            ? ["- 自然、得体，像平时跟这个人聊天的口吻"]
+            : tones.map { "- \($0.name)：\($0.rule)\n  例：「\($0.example.input)」→「\($0.example.output)」" }
+        // 程度和篇幅：和语音页同一套选择，换成回复里的说法
+        if !tones.isEmpty {
+            switch selection.intensity {
+            case .light: lines.append("- 程度：轻。语气只轻轻带一点，读起来自然不夸张")
+            case .medium: break
+            case .strong: lines.append("- 程度：重。语气拉满、明显夸张，但不编事实")
+            }
         }
+        var lengthRule = "每条不超过 60 字"
+        switch selection.length {
+        case .original: break
+        case .concise:
+            lines.append("- 篇幅：精简。每条都尽量短，能一句话说完就一句")
+            lengthRule = "每条不超过 20 字"
+        case .expand:
+            lines.append("- 篇幅：扩充。每条写成 2 到 4 句完整的话，补上理由、感受或客气话（不编具体事实）")
+            lengthRule = "每条 40 到 120 字"
+        case .organize:
+            lines.append("- 篇幅：梳理。要说的事不止一件时，结论先行，用 1. 2. 3. 分点")
+            lengthRule = "每条不超过 120 字"
+        }
+        let style = lines.joined(separator: "\n")
+        let varietyRule = selection.length == .expand || selection.length == .organize
+            ? "3 条长短要不一样" : "3 条长短要不一样，至少一条很短（10 个字以内）"
         return """
         你是用户的聊天回复代笔。用户收到了一条消息，你要替用户写几条可以直接发出去的回复。
 
@@ -54,16 +76,23 @@ enum ReplyGenerator {
         - 写 3 条回复，彼此要有区别（角度、措辞或态度不同），都能直接发出去
         - 有 <intent> 时，3 条都必须按用户的意思回（比如用户说要拒绝，就不能答应）
         - 没有 <intent> 时，3 条要是 3 种不同的态度：对方在邀请、请求或提问时，分别写「答应 / 接受」「先确认或换个方案」「婉拒」各一条；风格只决定怎么说，不决定答不答应
-        - 用用户的口吻（第一人称），像真人在手机上打字：口语、简短，每条不超过 60 字
+        - 用用户的口吻（第一人称），像真人在手机上打字：口语、简短，\(lengthRule)
         - 不编造具体事实：用户没说的时间、地点、理由、承诺不要写死，需要时用「我看下」「晚点跟你说」这类说法
         - 不要称呼对方的名字，不要加引号、编号或解释
+
+        ## 别有 AI 味（很重要）
+        - 不要复述、概括对方的话再评论：「上课加旅行，这生活节奏真棒」「你说的方案我看了……」这种开头一律不要
+        - 不要空泛的夸奖和总结：「真棒」「太好了」「好有意义」「听起来很不错」「加油哦」
+        - 像真人随手回消息：可以只回一句反应（「哇好羡慕」「笑死」），可以接一个具体的小问题（「去哪玩呀」），可以顺带说一句自己的情况
+        - 句子短，可以不完整、不讲究语法，口语词（「哈哈」「诶」「啊」「嗯嗯」）用得自然、别每条都用
+        - \(varietyRule)
 
         ## 输出
         只输出一个 JSON 字符串数组，例如 ["第一条", "第二条", "第三条"]，不要输出任何其他内容。
         """
     }
 
-    static func generate(message: String, intent: String?, tones: [Tone],
+    static func generate(message: String, intent: String?, style: StyleSelection,
                          completion: @escaping (Result<[String], Failure>) -> Void) {
         guard let provider = provider() else {
             completion(.failure(.noKey))
@@ -76,7 +105,7 @@ enum ReplyGenerator {
             "temperature": 0.8,
             "max_tokens": 600,
             "messages": [
-                ["role": "system", "content": systemPrompt(tones: tones)],
+                ["role": "system", "content": systemPrompt(style: style)],
                 ["role": "user", "content": user],
             ],
         ]
@@ -96,7 +125,7 @@ enum ReplyGenerator {
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                       let content = ((json["choices"] as? [[String: Any]])?.first?["message"] as? [String: Any])?["content"] as? String {
                 let replies = parse(content)
-                    .map { tones.contains(.formal) ? $0 : PeriodStyle.strip($0) }
+                    .map { style.tones.contains(.formal) ? $0 : PeriodStyle.strip($0) }
                 result = replies.isEmpty ? .failure(.badOutput) : .success(Array(replies.prefix(3)))
             } else {
                 result = .failure(.badOutput)

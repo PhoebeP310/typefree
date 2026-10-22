@@ -54,7 +54,8 @@ enum StandbyDuration: Int, CaseIterable, Identifiable {
     case sixty = 60
     case unlimited = 0
 
-    static let defaultsKey = "standby_minutes"
+    /// v2：旧键里存着早期测试选的 5 分钟，默认改成不自动关闭后旧值还在生效，换键让所有人回到默认
+    static let defaultsKey = "standby_minutes_v2"
 
     var id: Int { rawValue }
 
@@ -74,8 +75,9 @@ enum StandbyDuration: Int, CaseIterable, Identifiable {
 
     static var current: StandbyDuration {
         get {
-            let raw = TypefreeShared.defaults.object(forKey: defaultsKey) as? Int ?? StandbyDuration.fifteen.rawValue
-            return StandbyDuration(rawValue: raw) ?? .fifteen
+            // 默认不自动关闭：iOS 规定后台起不了麦克风，关了下次就得跳一次 App
+            let raw = TypefreeShared.defaults.object(forKey: defaultsKey) as? Int ?? StandbyDuration.unlimited.rawValue
+            return StandbyDuration(rawValue: raw) ?? .unlimited
         }
         set { TypefreeShared.defaults.set(newValue.rawValue, forKey: defaultsKey) }
     }
